@@ -1,0 +1,2 @@
+# 本机构建工具，npm install 可随时还原，不入库
+node_modules/

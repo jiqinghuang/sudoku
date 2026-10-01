@@ -1,0 +1,6 @@
+# 行尾统一 LF（与 jiqinghuang.github.io 仓库约定一致）
+*.html text eol=lf
+*.ts   text eol=lf
+*.js   text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
