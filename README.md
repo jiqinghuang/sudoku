@@ -36,6 +36,7 @@
 
 **方式二 · 本地离线玩**
 下载本仓库后**双击 `index.html`** 即可——纯静态页面，零依赖，不需要安装任何东西。
+（浏览器不允许 `file://` 页面创建 Worker，此时求解自动退回主线程同步执行，功能完全不受影响。）
 
 **方式三 · 开发 / 跑测试**
 
@@ -43,6 +44,7 @@
 npm install        # 安装 TypeScript 编译器（唯一的 devDependency，运行时零依赖）
 npm test           # 编译 src/*.ts → dist/*.js，并跑全部自动化测试
 npm run typecheck  # 仅类型检查
+npm run build      # 仅编译（dist/ 随仓库提交，改完 src 请重新编译，CI 会校验同步）
 ```
 
 ## 项目结构
@@ -54,12 +56,12 @@ npm run typecheck  # 仅类型检查
 | `src/ui.ts` | 界面逻辑：棋盘渲染、步骤回放、键盘 / 数字键盘 / 随机题 |
 | `src/worker.ts` | 求解 Worker：solve / 出题在后台线程执行，避免界面卡顿 |
 | `src/test.ts` | 求解器测试：正确性、回放一致性、边界、性能与 Worker 消息协议 |
-| `src/uitest.ts` | UI 接线测试：用最小 DOM stub 执行真实界面脚本 |
+| `src/uitest.ts` | UI 接线测试：用最小 DOM stub 执行真实界面脚本（同步路径 + 注入假 Worker 的降级路径） |
 | `dist/` | tsc 编译产物（随仓库提交，线上加载的就是它） |
 | `tsconfig.json` | strict 模式 TypeScript 配置 |
 | `.github/workflows/ci.yml` | CI：类型检查 + 全量测试 + dist 同步校验 |
 
-架构一句话：**TypeScript 源码 → tsc 编译 → 纯静态产物**。同一份求解器跑在浏览器（主线程与 Worker）和 Node 测试里。
+架构一句话：**TypeScript 源码 → tsc 编译 → 纯静态产物**。同一份求解器跑在浏览器（主线程与 Worker）和 Node 测试里；Worker 构造失败、脚本 404 或运行出错时自动退回主线程，两条路径行为一致，且任何失败都会恢复按钮可交互、如实报错而不是卡住。
 
 ## 质量保障
 
