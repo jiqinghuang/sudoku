@@ -185,7 +185,7 @@ button.pri:hover:not(:disabled){background:linear-gradient(180deg,#4a87f8,#3b7bf
   <h1>数独 · 逐步解</h1>
   <span class="tag" id="tVer">确定性推理 · 中文详解 · 可前进/后退</span>
   <span class="sp"></span>
-  <span class="tag" id="tState">未解题</span>
+  <span class="tag" id="tState" aria-live="polite">未解题</span>
 </header>
 
 <div class="wrap">
@@ -195,11 +195,11 @@ button.pri:hover:not(:disabled){background:linear-gradient(180deg,#4a87f8,#3b7bf
     <div class="playbar">
       <button class="pri" id="bSolve" title="校验题目并生成逐步推理">求解</button>
       <span class="navgrp">
-        <button id="bFirst" title="回到开头">⏮</button><button id="bPrev" title="上一步">◀</button>
-        <button id="bNext" title="下一步">▶</button><button id="bLast" title="跳到最后">⏭</button>
+        <button id="bFirst" title="回到开头" aria-label="回到开头">⏮</button><button id="bPrev" title="上一步" aria-label="上一步">◀</button>
+        <button id="bNext" title="下一步" aria-label="下一步">▶</button><button id="bLast" title="跳到最后" aria-label="跳到最后">⏭</button>
       </span>
       <button id="bPlay">▶ 自动</button>
-      <input type="range" id="spd" min="1" max="10" value="6" title="自动播放速度" class="spd">
+      <input type="range" id="spd" min="1" max="10" value="6" title="自动播放速度" aria-label="自动播放速度" class="spd">
     </div>
 
     <div class="padrow">

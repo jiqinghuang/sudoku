@@ -4,10 +4,77 @@
 const $ = (s: string): any => document.querySelector(s);      // 页面很小，DOM 查找统一按 any 处理
 const board = $('#board'), pad = $('#pad');
 let given: number[] = new Array(81).fill(0);
-let steps: Step[] = [], res: SolveResult | null = null, cur = 0, sel = 40,
+let steps: Step[] = [], cur = 0, sel = 40,
     playing: number | null = null, showCands = false, showElims = true;
 
 /* ---- 状态折叠由 solver.js 的 Sudoku.stateAt(given, steps, k) 提供 ---- */
+
+/* ---- HTML 转义：拼进 innerHTML 的动态文本必须经此处理 ----
+   当前动态文本全部由求解器生成（数字、格名、中文说明），本身不含 HTML 特殊字符；
+   转义属纵深防御——将来引入外部文本（如恢复粘贴载入）时不会形成注入点。
+   结构性模板与内部常量（TECHN、Sudoku.nm 等）无需转义。
+   入参按 unknown 接收并 String() 化：solver 新增技巧而 TECHN 忘记同步时
+   techLabel() 会返回 undefined，此处不应再抛错把整个 render 打断。 */
+const esc = (s: unknown): string => String(s).replace(/[&<>"']/g, c =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]);
+
+const bitsOf = Sudoku.bits;
+
+/* ---- 求解任务调度：优先走 Web Worker（dist/worker.js），专家题不冻结界面 ----
+   Worker 不可用（file:// 双击打开、脚本加载失败）时自动回退主线程同步执行——
+   两条路径跑的是同一份 dist/solver.js，行为一致；Node 下的 uitest 无 Worker，
+   走的正是同步回退路径。epoch 是谜面版本号：任何修改谜面的操作都会使其自增，
+   异步等待期间谜面若被改动，过期结果按版本丢弃。
+   任务一定以「成功回调」或 fail 回调结束：同步求解抛错、postMessage 投递失败、
+   Worker 内异常回退重试再抛错，都由 settle() 兜住，保证调用方的 setBusy(false)
+   必定执行——否则按钮会永久停在禁用态、状态标签永远显示「求解中…」。 */
+type TaskMsg = { type: 'solve'; given: number[] } | { type: 'generate'; minClues: number };
+interface PendingTask { msg: TaskMsg; fn: (data: any) => void; fail: (err: unknown) => void }
+
+let worker: Worker | null = null, workerBroken = false, taskId = 0, busy = false, epoch = 0;
+const pending: Map<number, PendingTask> = new Map();
+try { worker = new Worker('dist/worker.js'); }
+catch (e) { workerBroken = true; console.warn('[worker] 不可用，改为主线程同步求解：' + (e as Error).message); }
+
+const runSync = (msg: TaskMsg): any =>
+  msg.type === 'solve' ? Sudoku.solve(msg.given) : Sudoku.generatePuzzle(msg.minClues);
+
+/* 同步执行并兜住异常：这是「派发失败后重试」与「无 Worker 直接同步」两条路径的共同出口。 */
+function settle(p: PendingTask): void {
+  try { p.fn(runSync(p.msg)); } catch (e) { p.fail(e); }
+}
+
+function runTask(msg: TaskMsg, fn: (data: any) => void, fail: (err: unknown) => void): void {
+  const p: PendingTask = { msg, fn, fail };
+  if (!worker || workerBroken) { settle(p); return; }
+  const id = ++taskId;
+  pending.set(id, p);
+  try { worker.postMessage(Object.assign({ id }, msg)); }
+  catch (e) {   // 结构化克隆失败等投递期异常：就地退回同步，不把任务悬在 pending 里
+    console.warn('[worker] 投递失败，回退同步执行：' + (e as Error).message);
+    pending.delete(id); settle(p);
+  }
+}
+
+function setBusy(on: boolean): void {   // 任务在途：禁用会触发新任务的按钮，防重复提交
+  busy = on;
+  $('#bSolve').disabled = on;
+  (document.querySelectorAll('[data-gen]') as NodeListOf<HTMLElement>).forEach((b: any) => { b.disabled = on; });
+}
+
+if (worker) {
+  worker.onmessage = (e: MessageEvent): void => {
+    const p = pending.get(e.data.id);
+    if (p) { pending.delete(e.data.id); try { p.fn(e.data.data); } catch (err) { p.fail(err); } }
+  };
+  worker.onerror = (e: ErrorEvent): void => {   // 脚本 404 / 被 CSP 拦截 / Worker 内求解抛错
+    console.warn('[worker] 运行失败，改为主线程同步求解：' + (e.message || e.type));
+    workerBroken = true; worker = null;        // 一次性退回同步路径，不反复重试坏掉的 Worker
+    const tasks = [...pending.values()];
+    pending.clear();
+    for (const t of tasks) settle(t);
+  };
+}
 
 /* ---- 棋盘渲染（节点只建一次，之后只更新类名与内容） ---- */
 interface CellRefs { el: HTMLDivElement; v: HTMLSpanElement; cands: HTMLDivElement; badge: HTMLSpanElement }
@@ -98,7 +165,6 @@ function render(): void {
   }
   renderReason(); renderSteps();
 }
-const bitsOf = Sudoku.bits;
 
 const TECHN: Record<string, string> = { naked: '唯一候选数', hidden: '行/列/宫唯一', locked: '区块摒除',
                 nakedSub: '显性数组', hiddenSub: '隐性数组', xwing: 'X-Wing',
@@ -127,18 +193,18 @@ function renderReason(): void {
   const st = steps[cur - 1];
   idx.textContent = `第 ${cur} / ${steps.length} 步`;
   if (st.kind === 'place' && st.moves.length > 1) {
-    box.innerHTML = `<div class="t"><span class="tech">本步 ${st.moves.length} 格</span>${techLabel(st)}</div>` +
-      st.moves.map((mv, k) => `<div class="mv">${moveHead(mv, true, k)}<div class="mvr">${mv.reason.replace(/\n/g, '<br>')}</div></div>`).join('') +
+    box.innerHTML = `<div class="t"><span class="tech">本步 ${st.moves.length} 格</span>${esc(techLabel(st))}</div>` +
+      st.moves.map((mv, k) => `<div class="mv">${moveHead(mv, true, k)}<div class="mvr">${esc(mv.reason).replace(/\n/g, '<br>')}</div></div>`).join('') +
       legend();
     return;
   }
   if (st.kind === 'place') {
     const mv = st.moves[0];
-    box.innerHTML = `<div class="t">${moveHead(mv, false)}</div>${mv.reason.replace(/\n/g, '<br>')}` + legend();
+    box.innerHTML = `<div class="t">${moveHead(mv, false)}</div>${esc(mv.reason).replace(/\n/g, '<br>')}` + legend();
     return;
   }
-  const head = `<span class="tech">${TECHN[st.tech]}</span><span class="pos">${st.cells.map(Sudoku.nm).join('、')}</span> 排除 <span class="val g">{${bitsOf(st.mask).join(',')}}</span>`;
-  box.innerHTML = `<div class="t">${head}</div>${st.reason.replace(/\n/g, '<br>')}` + legend();
+  const head = `<span class="tech">${esc(TECHN[st.tech])}</span><span class="pos">${st.cells.map(Sudoku.nm).join('、')}</span> 排除 <span class="val g">{${bitsOf(st.mask).join(',')}}</span>`;
+  box.innerHTML = `<div class="t">${head}</div>${esc(st.reason).replace(/\n/g, '<br>')}` + legend();
 }
 
 function stepText(st: Step): string {
@@ -161,7 +227,7 @@ function renderSteps(): void {
     const n = i + 1, on = n === cur, past = n < cur;
     const isG = s.kind === 'place' && s.moves.every(m => m.tech === 'guess');
     const k = s.kind === 'elim' ? 'e' : isG ? 'g' : s.tech === 'mixed' ? 'm' : '';
-    return `<li class="${k} ${on ? 'on' : ''} ${past ? 'past' : ''}" data-n="${n}"><span class="n">${n}</span><span class="k">${techLabel(s)}</span><span class="x">${stepText(s)}</span></li>`;
+    return `<li class="${k} ${on ? 'on' : ''} ${past ? 'past' : ''}" data-n="${n}"><span class="n">${n}</span><span class="k">${esc(techLabel(s))}</span><span class="x">${esc(stepText(s))}</span></li>`;
   }).join('') + '</ol>';
   const on = el.querySelector('li.on'); if (on) on.scrollIntoView({ block: 'nearest' });
   el.querySelectorAll('li').forEach((li: any) => li.onclick = () => { stop(); cur = +li.dataset.n; render(); });
@@ -177,25 +243,36 @@ function setState(t: string, cls?: string): void {   // cls: ok / err / warn，�
 }
 
 function doSolve(): void {
-  stop(); cur = 0; steps = []; res = Sudoku.solve(given);
-  const clues = given.filter(Boolean).length;
-  let h = row('info', `已知数字 <b>${clues}</b> 个，空格 <b>${81 - clues}</b> 个`);
-  if (res.status === 'invalid') { setState('题目有误', 'err'); diag(h + row('bad', '❌ ' + res.msg)); render(); return; }
-  if (res.status === 'nosol') { setState('无解', 'err'); diag(h + row('bad', '❌ ' + res.msg)); render(); return; }
-  if (res.status === 'multi') { setState('多解', 'err'); diag(h + row('bad', '❌ ' + res.msg.replace(/\n/g, '<br>'))
-    + row('info', '需先补充已知数字使其唯一，才能给出确定步骤。')); render(); return; }
-  steps = res.steps || [];                       // 关键：把求解结果接到回放用的步骤表
-  h += row('ok', '✅ 唯一解（已验证解的数量 = 1）');
-  if (res.guesses) h += row('warn', `⚠ 含 <b>${res.guesses}</b> 步试填（逻辑推理已无法推进），这些步已标黄，不具备唯一性。`);
-  else h += row('ok', '全程仅用唯一性逻辑推理，无需试填。');
-  if (res.backtracks) h += row('info', `求解时发生 ${res.backtracks} 次试错回溯（未在步骤表中显示）。`);
-  const t = res.stats || {};
-  h += row('info', '技巧统计：' + (Object.keys(TECHN).filter(k => t[k]).map(k => `${TECHN[k]}×${t[k]}`).join('，') || '无'));
-  if (!steps.length) h += row('warn', '题目已填满，无需推理。');
-  diag(h);
-  setState(`共 ${steps.length} 步${res.guesses ? '（含试填）' : ''}`,
-           steps.length === 0 ? '' : res.guesses ? 'warn' : 'ok');
-  render();
+  if (busy) return;                              // 已有任务在途，忽略重复触发
+  stop(); cur = 0; steps = [];
+  const ep = epoch;                              // 记下谜面版本：等待期间谜面变了就丢弃结果
+  setBusy(true); setState('求解中…');
+  runTask({ type: 'solve', given }, (res: SolveResult) => {
+    setBusy(false);
+    if (ep !== epoch) return;                     // 过期结果：谜面已被修改，等用户重新求解
+    const clues = given.filter(Boolean).length;
+    let h = row('info', `已知数字 <b>${clues}</b> 个，空格 <b>${81 - clues}</b> 个`);
+    if (res.status === 'invalid') { setState('题目有误', 'err'); diag(h + row('bad', '❌ ' + esc(res.msg))); render(); return; }
+    if (res.status === 'nosol') { setState('无解', 'err'); diag(h + row('bad', '❌ ' + esc(res.msg))); render(); return; }
+    if (res.status === 'multi') { setState('多解', 'err'); diag(h + row('bad', '❌ ' + esc(res.msg).replace(/\n/g, '<br>'))
+      + row('info', '需先补充已知数字使其唯一，才能给出确定步骤。')); render(); return; }
+    steps = res.steps || [];                       // 关键：把求解结果接到回放用的步骤表
+    h += row('ok', '✅ 唯一解（已验证解的数量 = 1）');
+    if (res.guesses) h += row('warn', `⚠ 含 <b>${res.guesses}</b> 步试填（逻辑推理已无法推进），这些步已标黄，不具备唯一性。`);
+    else h += row('ok', '全程仅用唯一性逻辑推理，无需试填。');
+    if (res.backtracks) h += row('info', `求解时发生 ${res.backtracks} 次试错回溯（未在步骤表中显示）。`);
+    const t = res.stats || {};
+    h += row('info', '技巧统计：' + (Object.keys(TECHN).filter(k => t[k]).map(k => `${TECHN[k]}×${t[k]}`).join('，') || '无'));
+    if (!steps.length) h += row('warn', '题目已填满，无需推理。');
+    diag(h);
+    setState(`共 ${steps.length} 步${res.guesses ? '（含试填）' : ''}`,
+             steps.length === 0 ? '' : res.guesses ? 'warn' : 'ok');
+    render();
+  }, (err) => {                                // 求解抛错：恢复可交互状态并如实报错
+    setBusy(false);
+    setState('求解失败', 'err');
+    diag(row('bad', '❌ 求解出错：' + esc(err instanceof Error ? err.message : err)));
+  });
 }
 
 function goto(n: number): void { cur = Math.max(0, Math.min(steps.length, n)); render(); }
@@ -210,15 +287,17 @@ function play(): void {
 }
 
 /* ---- 键盘 / 按钮 ---- */
-function editGiven(i: number, v: number): void {  // 键盘与数字键盘共用，避免两条路径行为不一致
-  stop(); given[i] = v; steps = []; cur = 0; res = null;
+function editGiven(i: number, v: number): boolean {   // 键盘与数字键盘共用，避免两条路径行为不一致
+  if (busy) return false;   // 任务在途时忽略改谜面：否则刚填的数字会被同批在途的出题结果静默覆盖
+  stop(); epoch++; given[i] = v; steps = []; cur = 0;
   setState('未解题');
   diag(row('info', '已修改谜面，点「求解」重新生成步骤。'));
+  return true;
 }
 const D: string[] = ['1','2','3','4','5','6','7','8','9','0'];
 pad.innerHTML = D.map(d => `<button data-d="${d}">${d === '0' ? '清除' : d}</button>`).join('');
 pad.querySelectorAll('button').forEach((b: any) => b.onclick = () => {
-  editGiven(sel, +b.dataset.d); sel = (sel + 1) % 81; render();
+  if (editGiven(sel, +b.dataset.d)) { sel = (sel + 1) % 81; render(); }   // 未写入（任务在途）则光标不前进
 });
 $('#bSolve').onclick = doSolve;
 $('#bFirst').onclick = () => { stop(); goto(0); };
@@ -229,11 +308,23 @@ $('#bPlay').onclick = play;
 $('#spd').oninput = () => { if (playing) { stop(); if (cur < steps.length) play(); } };   // 播放中调速立即生效
 $('#cCands').onchange = (e: any) => { showCands = e.target.checked; render(); };
 $('#cElims').onchange = (e: any) => { showElims = e.target.checked; renderSteps(); };
-$('#bClr').onclick = () => { stop(); given = new Array(81).fill(0); steps = []; cur = 0; sel = 40; res = null;
+$('#bClr').onclick = () => { stop(); epoch++; given = new Array(81).fill(0); steps = []; cur = 0; sel = 40;
   setState('未解题');
   diag(row('info', '空白盘面，点数字键填入已知数字。')); render(); };
 (document.querySelectorAll('[data-gen]') as NodeListOf<HTMLElement>).forEach(b => b.onclick = () => {
-  stop(); given = Sudoku.generatePuzzle(+(b.dataset.gen as string)); steps = []; cur = 0; doSolve();
+  if (busy) return;                               // 出题中/求解中，忽略重复点击
+  stop(); steps = []; cur = 0; epoch++;           // 换题使在途求解结果失效
+  const ep = epoch;
+  setBusy(true); setState('出题中…');
+  runTask({ type: 'generate', minClues: +(b.dataset.gen as string) }, (p: number[]) => {
+    setBusy(false);
+    if (ep !== epoch) return;                     // 等待期间用户清空/改过谜面：丢弃本次出题，不覆盖用户操作
+    given = p; doSolve();
+  }, (err) => {
+    setBusy(false);
+    setState('出题失败', 'err');
+    diag(row('bad', '❌ 出题出错：' + esc(err instanceof Error ? err.message : err)));
+  });
 });
 
 addEventListener('keydown', (e: KeyboardEvent) => {

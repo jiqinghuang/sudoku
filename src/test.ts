@@ -1,9 +1,17 @@
 // 数独求解器测试（源码 src/test.ts → 编译产物 dist/test.js）
 // 测试直接 require 同目录的 dist/solver.js 产物——测的就是浏览器实际加载的那份代码。
 const Sudoku = require('./solver.js') as SudokuAPI;
+const fs = require('fs');
 
 let pass = 0, fail = 0;
 const ok = (c: unknown, m: string): void => { c ? (pass++, console.log('  PASS ' + m)) : (fail++, console.log('  FAIL ' + m)); };
+
+/* 分段执行：某一段抛出的运行时异常只记一次失败并继续跑完其余段落，
+   不会中断整个测试文件（旧版一处异常会吞掉后面所有段落的报告）。 */
+function section(name: string, fn: () => void): void {
+  console.log('\n[' + name + ']');
+  try { fn(); } catch (e) { fail++; console.log('  FAIL 段落异常 [' + name + ']：' + (e as Error).message); }
+}
 
 // solve() 的返回是按 status 区分的联合类型；测试断言跟随运行时结果，
 // 统一经此解包，保持与原 test.js 相同的松散访问风格。
@@ -58,16 +66,18 @@ const validSolution = (v: number[], g: number[]): boolean => {
   return true;
 };
 
-console.log('\n[1] 经典题：唯一解 + 解正确');
-let r = solve(WIKI_G);
-ok(r.status === 'ok', 'status=ok (得到 ' + r.status + ')');
-ok(r.final && r.final.join('') === WIKI_S.join(''), '解与标准答案一致');
-ok(r.guesses === 0, '无需试填 (guesses=' + r.guesses + ')');
-ok(r.backtracks === 0, '无试错回溯 (backtracks=' + r.backtracks + ')');
-console.log('    步骤数=' + r.steps.length + '  技巧=' + JSON.stringify(r.stats) + '  回溯=' + r.backtracks);
+let r: any;   // 第 [1] 段求解的经典题结果，后续多段复用
 
-console.log('\n[2] 回放一致性：逐步折叠第 k 步 == 求解器内部第 k 步');
-{
+section('1 经典题：唯一解 + 解正确', () => {
+  r = solve(WIKI_G);
+  ok(r.status === 'ok', 'status=ok (得到 ' + r.status + ')');
+  ok(r.final && r.final.join('') === WIKI_S.join(''), '解与标准答案一致');
+  ok(r.guesses === 0, '无需试填 (guesses=' + r.guesses + ')');
+  ok(r.backtracks === 0, '无试错回溯 (backtracks=' + r.backtracks + ')');
+  console.log('    步骤数=' + r.steps.length + '  技巧=' + JSON.stringify(r.stats) + '  回溯=' + r.backtracks);
+});
+
+section('2 回放一致性：逐步折叠第 k 步 == 求解器内部第 k 步', () => {
   let bad = 0, badCand = 0;
   for (let k = 0; k <= r.steps.length; k++) {
     const s = Sudoku.stateAt(WIKI_G, r.steps, k);
@@ -82,58 +92,62 @@ console.log('\n[2] 回放一致性：逐步折叠第 k 步 == 求解器内部第
   ok(badCand === 0, '过程中无「空且零候选」的矛盾格 (' + badCand + ' 处)');
   const fin = Sudoku.stateAt(WIKI_G, r.steps, r.steps.length);
   ok(Array.from(fin.val).join('') === WIKI_S.join(''), '回放到底 == 标准答案');
-}
+});
 
-console.log('\n[3] 每一步的理由与合法性');
-ok(r.steps.every((s: any) => s.reason && s.reason.length > 20), '每步都有非空理由');
-ok(r.steps.every((s: any) => s.kind === 'place'
-    ? s.moves.every((mv: any) => mv.reason.includes('【'))
-    : s.reason.includes('【')), '每格理由都带技巧标签');
-{
-  let bad = 0;
-  for (let k = 1; k <= r.steps.length; k++) {
-    const st = r.steps[k - 1], s = Sudoku.stateAt(WIKI_G, r.steps, k - 1);
-    if (st.kind === 'place') {
-      const seen = new Set<number>();
-      for (const mv of st.moves) {
-        if (s.val[mv.i]) bad++;                                  // 不能重复填
-        if (!(s.cand[mv.i] & (1 << (mv.v - 1)))) bad++;          // 值必须在当时候选内
-        if (seen.has(mv.i)) bad++;                               // 同一批不能重复填同一格
-        seen.add(mv.i);
-        if (!mv.reason || mv.reason.length < 20) bad++;          // 每格都要有理由
+section('3 每一步的理由与合法性', () => {
+  ok(r.steps.every((s: any) => s.reason && s.reason.length > 20), '每步都有非空理由');
+  ok(r.steps.every((s: any) => s.kind === 'place'
+      ? s.moves.every((mv: any) => mv.reason.includes('【'))
+      : s.reason.includes('【')), '每格理由都带技巧标签');
+  {
+    let bad = 0;
+    for (let k = 1; k <= r.steps.length; k++) {
+      const st = r.steps[k - 1], s = Sudoku.stateAt(WIKI_G, r.steps, k - 1);
+      if (st.kind === 'place') {
+        const seen = new Set<number>();
+        for (const mv of st.moves) {
+          if (s.val[mv.i]) bad++;                                  // 不能重复填
+          if (!(s.cand[mv.i] & (1 << (mv.v - 1)))) bad++;          // 值必须在当时候选内
+          if (seen.has(mv.i)) bad++;                               // 同一批不能重复填同一格
+          seen.add(mv.i);
+          if (!mv.reason || mv.reason.length < 20) bad++;          // 每格都要有理由
+        }
+      } else {
+        if (!st.cells.length) bad++;
+        if (st.cells.some((i: number) => s.val[i])) bad++;                 // 不能排除已填格
+        if (st.cells.some((i: number) => !(s.cand[i] & st.mask))) bad++;   // 当时确实含该候选
       }
-    } else {
-      if (!st.cells.length) bad++;
-      if (st.cells.some((i: number) => s.val[i])) bad++;                 // 不能排除已填格
-      if (st.cells.some((i: number) => !(s.cand[i] & st.mask))) bad++;   // 当时确实含该候选
     }
-  }
-  ok(bad === 0, '每步都基于当时盘面合法 (' + bad + ' 处异常)');
-  const filled = r.steps.reduce((n: number, s: any) => n + (s.kind === 'place' ? s.moves.length : 0), 0);
-  ok(filled === 81 - WIKI_G.filter(Boolean).length, `填数步数 ${filled} == 空格数 ${81 - WIKI_G.filter(Boolean).length}`);
-  // 隐性唯一数的理由里「已填 N 格」必须与实际一致
-  let wrongCount = 0, hiddenN = 0;
-  for (let k = 1; k <= r.steps.length; k++) {
-    const st = r.steps[k - 1];
-    if (st.kind !== 'place') continue;
-    const s = Sudoku.stateAt(WIKI_G, r.steps, k - 1);
-    for (const mv of st.moves) {
-      if (mv.tech !== 'hidden') continue;
-      hiddenN++;
-      const unit = /【(.+?)唯一】/.exec(mv.reason)![1];
-      let u: number;
-      if (unit.endsWith('行')) u = +unit.slice(1, -1) - 1;
-      else if (unit.endsWith('列')) u = 9 + +unit.slice(1, -1) - 1;
-      else u = 18 + +unit.slice(1, -1) - 1;
-      const filled = Sudoku.UNITS[u].filter(i => s.val[i]).length;
-      if (+/已填 (\d+) 格/.exec(mv.reason)![1] !== filled) wrongCount++;
+    ok(bad === 0, '每步都基于当时盘面合法 (' + bad + ' 处异常)');
+    const filled = r.steps.reduce((n: number, s: any) => n + (s.kind === 'place' ? s.moves.length : 0), 0);
+    ok(filled === 81 - WIKI_G.filter(Boolean).length, `填数步数 ${filled} == 空格数 ${81 - WIKI_G.filter(Boolean).length}`);
+    // 隐性唯一数的理由里「已填 N 格」必须与实际一致
+    let wrongCount = 0, hiddenN = 0;
+    for (let k = 1; k <= r.steps.length; k++) {
+      const st = r.steps[k - 1];
+      if (st.kind !== 'place') continue;
+      const s = Sudoku.stateAt(WIKI_G, r.steps, k - 1);
+      for (const mv of st.moves) {
+        if (mv.tech !== 'hidden') continue;
+        hiddenN++;
+        const unit = /【(.+?)唯一】/.exec(mv.reason)![1];
+        let u: number;
+        if (unit.endsWith('行')) u = +unit.slice(1, -1) - 1;
+        else if (unit.endsWith('列')) u = 9 + +unit.slice(1, -1) - 1;
+        else u = 18 + +unit.slice(1, -1) - 1;
+        const filled = Sudoku.UNITS[u].filter(i => s.val[i]).length;
+        if (+/已填 (\d+) 格/.exec(mv.reason)![1] !== filled) wrongCount++;
+      }
     }
+    ok(hiddenN > 0 && wrongCount === 0, `隐性唯一数理由的「已填 N 格」与实际一致（${hiddenN} 条，${wrongCount} 条错误）`);
+    // ui.ts 以 esc() 转义后拼 innerHTML：求解器自由文本不含 HTML 特殊字符是前置约束
+    ok(r.steps.every((s: any) => !/[<>&]/.test(s.reason || '')
+        && (s.kind !== 'place' || s.moves.every((mv: any) => !/[<>&]/.test(mv.reason || '')))),
+      '理由文本不含 HTML 特殊字符（ui 层 esc 的前置约束）');
   }
-  ok(hiddenN > 0 && wrongCount === 0, `隐性唯一数理由的「已填 N 格」与实际一致（${hiddenN} 条，${wrongCount} 条错误）`);
-}
+});
 
-console.log('\n[4] 题目错误（已知数字冲突）');
-{
+section('4 题目错误（已知数字冲突）', () => {
   const bad = WIKI_G.slice(); bad[0] = 5; bad[1] = 5;   // R1C1 和 R1C2 都是 5
   const x = solve(bad);
   ok(x.status === 'invalid', 'status=invalid (得到 ' + x.status + ')');
@@ -147,10 +161,9 @@ console.log('\n[4] 题目错误（已知数字冲突）');
   const box = WIKI_G.slice(); box[19] = 5;              // R3C2 与 R1C1 同宫
   const z = solve(box);
   ok(z.status === 'invalid' && /第1宫/.test(z.msg), '宫重复定位到宫: ' + z.msg);
-}
+});
 
-console.log('\n[5] 无解（已知数字不重复，但全局无解）');
-{
+section('5 无解（已知数字不重复，但全局无解）', () => {
   let seed = 424242; const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
   let found = 0, tried = 0, totalBacktracks = 0;
   while (found < 3 && tried < 40000) {
@@ -168,10 +181,9 @@ console.log('\n[5] 无解（已知数字不重复，但全局无解）');
   }
   ok(found >= 3, `构造出 ${found} 个无解样本（尝试 ${tried} 次）`);
   ok(Number.isInteger(totalBacktracks) && totalBacktracks >= 0, `无解题回溯计数是合法整数 ${totalBacktracks}（回归：NaN）`);
-}
+});
 
-console.log('\n[6] 多解');
-{
+section('6 多解', () => {
   let found = 0;
   for (let i = 0; i < 81 && found < 2; i++) {
     const p = WIKI_G.slice(); p[i] = 0;
@@ -181,10 +193,9 @@ console.log('\n[6] 多解');
   ok(found >= 1, '至少找到 1 个多解样本 (' + found + ')');
   const p = WIKI_G.slice(); p[80] = 0;                      // 最后一格通常是唯一可推的
   ok(solve(p).status === 'ok', '只去掉唯一可推格时仍是唯一解');
-}
+});
 
-console.log('\n[7] 边界与性能');
-{
+section('7 边界与性能', () => {
   const t0 = Date.now();
   const empty = solve(new Array(81).fill(0));
   ok(Date.now() - t0 < 8000, `空盘不死循环/不过慢 (${Date.now() - t0}ms, status=${empty.status})`);
@@ -207,10 +218,9 @@ console.log('\n[7] 边界与性能');
   }
   ok(uniq === gens, `生成器 ${gens} 道题全部唯一且解正确 (${uniq}/${gens})，耗时 ${Date.now() - t1}ms`);
   ok(clueCounts.every(c => c >= 24 && c <= 45), 'clue 数在合理区间: ' + clueCounts.join(','));
-}
+});
 
-console.log('\n[8] 回归：与朴素 DFS 对拍（防止过度剪枝 / 漏解）');
-{
+section('8 回归：与朴素 DFS 对拍（防止过度剪枝 / 漏解）', () => {
   let seed = 777; const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
   let mismatch = 0, tested = 0, exact = 0;
   for (let trial = 0; trial < 220; trial++) {
@@ -230,10 +240,9 @@ console.log('\n[8] 回归：与朴素 DFS 对拍（防止过度剪枝 / 漏解�
     if (a === 1) { const rr = solve(p); if (rr.status !== 'ok' || rr.final.join('') !== WIKI_S.join('')) { mismatch++; console.log('    唯一解不符 clues=' + p.filter(Boolean).length + ' status=' + rr.status); } }
   }
   ok(mismatch === 0, `${tested} 道随机题与朴素 DFS 解数完全一致 (一致 ${exact}，不符 ${mismatch})`);
-}
+});
 
-console.log('\n[9] 技巧回归：隐性数组 / X-Wing 必须能触发（旧版隐性数对是死代码）');
-{
+section('9 技巧回归：隐性数组 / X-Wing 必须能触发（旧版隐性数对是死代码）', () => {
   const parseDots = (s: string): number[] => s.split('').map(c => c === '.' ? 0 : +c);
   const cases: Array<[string, string]> = [
     ['hiddenSub', '..46..9......9...8...34.5...5...14...2.....9.7.....856..15.7..4.8.4...3..........'],
@@ -247,10 +256,9 @@ console.log('\n[9] 技巧回归：隐性数组 / X-Wing 必须能触发（旧版
     const sols = Sudoku.findAll(g, 2).solutions;
     ok(sols.length === 1 && rr.final.join('') === sols[0].join(''), `${tech} 题唯一解且答案一致`);
   }
-}
+});
 
-console.log('\n[10] 批量填数：一步多格且互不依赖');
-{
+section('10 批量填数：一步多格且互不依赖', () => {
   const multi = r.steps.filter((s: any) => s.kind === 'place' && s.moves.length > 1);
   const maxN = Math.max(0, ...multi.map((s: any) => s.moves.length));
   ok(multi.length > 0, `存在多格步骤（${multi.length} 步批量，单步最多 ${maxN} 格）`);
@@ -275,7 +283,30 @@ console.log('\n[10] 批量填数：一步多格且互不依赖');
     const b = Sudoku.stateAt(WIKI_G, flipped, bi + 1);
     ok(a.val.join('') === b.val.join('') && a.cand.join('') === b.cand.join(''), '批量内顺序不影响回放结果（互不依赖）');
   }
-}
+});
+
+section('11 Worker 协议：dist/worker.js 与 ui.ts 的消息契约', () => {
+  const src = fs.readFileSync(__dirname + '/worker.js', 'utf8');
+  const posted: any[] = [];
+  const stubSelf: any = {
+    importScripts(): void {},                                   // 测试里 Sudoku 已注入，无需真加载
+    postMessage(m: any): void { posted.push(m); },
+    onmessage: null,
+  };
+  // 以参数注入 worker.js 用到的两个自由变量（self / Sudoku）——与浏览器 Worker 内一致
+  const initWorker = new Function('self', 'Sudoku', src) as (self: any, Sudoku: SudokuAPI) => void;
+  initWorker(stubSelf, Sudoku);
+  const fire = (msg: any): any => { posted.length = 0; stubSelf.onmessage({ data: msg }); return posted[0]; };
+
+  const a = fire({ type: 'solve', given: WIKI_G, id: 7 });
+  ok(a && a.id === 7 && a.data.status === 'ok', 'solve：回带请求 id，status=ok');
+  ok(a.data.final.join('') === WIKI_S.join(''), 'solve：解与标准答案一致');
+  ok(JSON.stringify(a.data.steps) === JSON.stringify(solve(WIKI_G).steps), 'solve：步骤表与主线程求解完全一致');
+  const b = fire({ type: 'generate', minClues: 34, id: 8 });
+  ok(b && b.id === 8 && Array.isArray(b.data) && b.data.length === 81, 'generate：回带 id，产出 81 格谜面');
+  ok(b.data.filter(Boolean).length >= 24 && solve(b.data).status === 'ok', 'generate：谜面唯一可解');
+  ok(fire({ type: 'unknown', id: 9 }) === undefined, '未知消息类型被忽略（不回复、不崩溃）');
+});
 
 console.log(`\n========== 通过 ${pass} / 失败 ${fail} ==========`);
 process.exit(fail ? 1 : 0);
