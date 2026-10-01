@@ -319,49 +319,6 @@ $('#bClr').onclick = () => {
     diag(row('info', '空白盘面，点数字键填入已知数字。'));
     render();
 };
-/* 解析粘贴的谜面，支持：
-   1) 81 字符，0 / . / - 表示空
-   2) . 分隔的 81 个单字符格
-   3) 9 行 × 9 格（行内可再用 . 分隔）
-   4) 以上任意一种带 "0." 行号前缀（如 0.530070…）
-   返回长度 81 的数字数组；无法解析返回 null。 */
-function parseOne(raw) {
-    const cells = (s) => s.split('').map(ch => (ch >= '1' && ch <= '9') ? +ch : 0);
-    if (raw.length === 81)
-        return cells(raw);
-    const tokens = raw.split('.').filter(Boolean);
-    if (tokens.length === 81 && tokens.every(t => t.length === 1))
-        return tokens.map(t => +t);
-    if (tokens.length === 9 && tokens.every(t => t.length === 9))
-        return cells(tokens.join(''));
-    const digits = raw.replace(/\./g, '');
-    if (digits.length === 81)
-        return cells(digits);
-    return null;
-}
-function parsePuzzle(text) {
-    let raw = String(text == null ? '' : text).replace(/[^0-9.\-]/g, '').replace(/-/g, '.');
-    for (let depth = 0; depth < 3; depth++) {
-        const g = parseOne(raw);
-        if (g)
-            return g;
-        if (!/^\d+\./.test(raw))
-            break;
-        raw = raw.replace(/^\d+\./, '');
-    }
-    return null;
-}
-$('#bPaste').onclick = () => {
-    const g = parsePuzzle($('#paste').value);
-    if (!g) {
-        alert('无法解析谜面：需要 81 个字符（0 / . / - 表示空），或用 . 分隔的 81 格，或 9 行×9 格（可带 0. 行号前缀）。');
-        return;
-    }
-    given = g;
-    steps = [];
-    cur = 0;
-    doSolve();
-};
 document.querySelectorAll('[data-gen]').forEach(b => b.onclick = () => {
     stop();
     given = Sudoku.generatePuzzle(+b.dataset.gen);
@@ -371,11 +328,8 @@ document.querySelectorAll('[data-gen]').forEach(b => b.onclick = () => {
 });
 addEventListener('keydown', (e) => {
     const tgt = e.target;
-    if (tgt.tagName === 'INPUT') { // 输入框/滑杆交给控件自己处理
-        if (tgt.type === 'text' && e.key === 'Enter')
-            $('#bPaste').click();
-        return;
-    }
+    if (tgt.tagName === 'INPUT')
+        return; // 滑杆等控件交给它自己处理
     const r = (sel / 9 | 0), c = sel % 9;
     if (e.key === 'ArrowUp') {
         sel = ((r + 8) % 9) * 9 + c;

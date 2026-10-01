@@ -59,13 +59,13 @@ let keyHandler: ((e: any) => void) | null = null;
 
 interface UiApi {
   doSolve(): void; goto(n: number): void; stop(): void; editGiven(i: number, v: number): void;
-  bitsOf(m: number): number[]; parsePuzzle(text: unknown): number[] | null;
+  bitsOf(m: number): number[];
   readonly cur: number; readonly steps: Step[]; readonly sel: number;
   given: number[];
 }
 
 const api = new Function('document', 'addEventListener', 'alert', 'Sudoku', script + `
-  ;return { doSolve, goto, stop, editGiven, bitsOf, parsePuzzle,
+  ;return { doSolve, goto, stop, editGiven, bitsOf,
            get cur() { return cur; }, get steps() { return steps; },
            get sel() { return sel; },
            get given() { return given; }, set given(v) { given = v; } };
@@ -209,38 +209,6 @@ console.log('\n[U7] 排除步骤：被划掉的候选必须回显且带删除线
   }
   ok(strikeCells > 0, `排除格回显了被划掉的候选（${strikeCells}/${cells.length} 格）`);
   ok(shownDigits > 0, `划掉的数字仍在候选里显示（${shownDigits} 处）`);
-}
-
-console.log('\n[U8] 粘贴解析：多种格式等价，非法输入被拒绝');
-{
-  const S = '530070000600195000098000060800060003400803001700020006060000280000419005000080079';
-  const D = '53..7....6..195....98....6.8...6...34..8.3..17...2...6.6....28....419..5....8..79';
-  const expect = S.split('').map(Number);
-  const cases: Array<[string, string]> = [
-    ['81 字符（0 为空）', S],
-    ['81 字符（. 为空）', D],
-    ['81 字符（- 为空）', D.replace(/\./g, '-')],
-    ['点分隔 81 格', S.split('').join('.')],
-    ['0. 前缀 + 81 字符', '0.' + S],
-    ['0. 前缀 + 点分隔', '0.' + S.split('').join('.')],
-    ['9 行 × 9 格（点分隔）', S.match(/.{9}/g)!.join('.')],
-    ['9 行 × 9 格（换行）', S.match(/.{9}/g)!.join('\n')],
-  ];
-  let bad = 0;
-  for (const [name, text] of cases) {
-    const g = api.parsePuzzle(text);
-    if (!g || g.join('') !== expect.join('')) { bad++; console.log('    解析失败: ' + name + ' -> ' + (g ? g.join('') : 'null')); }
-  }
-  ok(bad === 0, `${cases.length} 种粘贴格式都解析为同一谜面（失败 ${bad}）`);
-  ok(api.parsePuzzle('123') === null, '位数不足 -> 拒绝');
-  ok(api.parsePuzzle('') === null, '空输入 -> 拒绝');
-  ok(api.parsePuzzle('abc') === null, '纯字母 -> 拒绝');
-
-  cache['#paste'] = mkEl('input');                  // 端到端：载入按钮 -> 写入谜面 -> 自动求解
-  cache['#paste'].value = D;
-  cache['#bPaste'].onclick();
-  ok(api.given.join('') === expect.join('') && api.steps.length > 0,
-     `点「载入」后谜面进入棋盘并自动求解（${api.steps.length} 步）`);
 }
 
 console.log(`\n========== UI 测试 通过 ${pass} / 失败 ${fail} ==========`);

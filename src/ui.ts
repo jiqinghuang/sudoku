@@ -232,47 +232,13 @@ $('#cElims').onchange = (e: any) => { showElims = e.target.checked; renderSteps(
 $('#bClr').onclick = () => { stop(); given = new Array(81).fill(0); steps = []; cur = 0; sel = 40; res = null;
   setState('未解题');
   diag(row('info', '空白盘面，点数字键填入已知数字。')); render(); };
-/* 解析粘贴的谜面，支持：
-   1) 81 字符，0 / . / - 表示空
-   2) . 分隔的 81 个单字符格
-   3) 9 行 × 9 格（行内可再用 . 分隔）
-   4) 以上任意一种带 "0." 行号前缀（如 0.530070…）
-   返回长度 81 的数字数组；无法解析返回 null。 */
-function parseOne(raw: string): number[] | null {
-  const cells = (s: string): number[] => s.split('').map(ch => (ch >= '1' && ch <= '9') ? +ch : 0);
-  if (raw.length === 81) return cells(raw);
-  const tokens = raw.split('.').filter(Boolean);
-  if (tokens.length === 81 && tokens.every(t => t.length === 1)) return tokens.map(t => +t);
-  if (tokens.length === 9 && tokens.every(t => t.length === 9)) return cells(tokens.join(''));
-  const digits = raw.replace(/\./g, '');
-  if (digits.length === 81) return cells(digits);
-  return null;
-}
-function parsePuzzle(text: unknown): number[] | null {
-  let raw = String(text == null ? '' : text).replace(/[^0-9.\-]/g, '').replace(/-/g, '.');
-  for (let depth = 0; depth < 3; depth++) {
-    const g = parseOne(raw);
-    if (g) return g;
-    if (!/^\d+\./.test(raw)) break;
-    raw = raw.replace(/^\d+\./, '');
-  }
-  return null;
-}
-$('#bPaste').onclick = () => {
-  const g = parsePuzzle($('#paste').value);
-  if (!g) { alert('无法解析谜面：需要 81 个字符（0 / . / - 表示空），或用 . 分隔的 81 格，或 9 行×9 格（可带 0. 行号前缀）。'); return; }
-  given = g; steps = []; cur = 0; doSolve();
-};
 (document.querySelectorAll('[data-gen]') as NodeListOf<HTMLElement>).forEach(b => b.onclick = () => {
   stop(); given = Sudoku.generatePuzzle(+(b.dataset.gen as string)); steps = []; cur = 0; doSolve();
 });
 
 addEventListener('keydown', (e: KeyboardEvent) => {
   const tgt = e.target as unknown as { tagName: string; type: string };
-  if (tgt.tagName === 'INPUT') {                 // 输入框/滑杆交给控件自己处理
-    if (tgt.type === 'text' && e.key === 'Enter') $('#bPaste').click();
-    return;
-  }
+  if (tgt.tagName === 'INPUT') return;           // 滑杆等控件交给它自己处理
   const r = (sel / 9 | 0), c = sel % 9;
   if (e.key === 'ArrowUp') { sel = ((r + 8) % 9) * 9 + c; e.preventDefault(); }
   else if (e.key === 'ArrowDown') { sel = ((r + 1) % 9) * 9 + c; e.preventDefault(); }
