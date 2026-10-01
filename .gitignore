@@ -1,2 +1,4 @@
 # 本机构建工具，npm install 可随时还原，不入库
 node_modules/
+# 本地工具的记忆/会话文件，非项目产物，不入库
+.workbuddy/

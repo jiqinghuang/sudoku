@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # dist 是随仓库提交的编译产物（线上加载的就是它）：
+      # 重新编译后 diff 必须为空，防止改了 src 忘记 build 就提交。
+      # --ignore-cr-at-eol：Windows（CRLF）与 Linux（LF）行尾差异不算失步。
+      # 先 git add -A 再 diff --cached：新增的编译产物（如 dist/worker.js）在入库前
+      # 是未跟踪状态，git diff 看不见——漏提交它会静默让页面退回同步求解且测试照常全绿。
+      - name: dist 与 src 同步校验
+        run: |
+          git add -A dist
+          git diff --cached --ignore-cr-at-eol --exit-code
