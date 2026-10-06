@@ -117,10 +117,25 @@ button.pri:hover:not(:disabled){background:linear-gradient(180deg,#4a87f8,#3b7bf
 .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;
   box-shadow:var(--shadow);display:flex;flex-direction:column;flex:0 0 auto}
 .card.grow{flex:1 1 0;min-height:0}
-.card>h2{flex:0 0 auto;margin:0;padding:8px 15px;font-size:12px;font-weight:600;color:var(--dim);
-  border-bottom:1px solid var(--line);background:var(--panel2);letter-spacing:.4px;
+.card>h2{flex:0 0 auto;margin:0;padding:8px 15px;font-size:12px;font-weight:600;color:var(--dim);border-bottom:1px solid var(--line);background:var(--panel2);letter-spacing:.4px;
   display:flex;justify-content:space-between;align-items:center}
 .card .body{padding:10px 15px;min-height:0;overflow-y:auto}
+/* 逐格理由可折叠（#bExpand / details.mv）：默认只展开第一条，其余点开 */
+.card>h2 .lnk{font:inherit;font-size:11px;font-weight:500;color:var(--acc2);background:none;border:1px solid var(--line2);
+  border-radius:999px;padding:1px 9px;cursor:pointer}
+.card>h2 .lnk:hover{background:var(--acc-soft);border-color:var(--acc)}
+#reason details.mv{border-top:1px dashed var(--line);margin-top:7px;padding-top:5px}
+#reason details.mv>summary.mvs{display:flex;align-items:center;gap:6px;cursor:pointer;list-style:none}
+#reason details.mv>summary.mvs::-webkit-details-marker{display:none}
+#reason details.mv>summary.mvs::before{content:'▸';color:var(--dim);font-size:10px;flex:0 0 auto}
+#reason details.mv[open]>summary.mvs::before{content:'▾'}
+#reason details.mv>summary.mvs .mvh{margin-bottom:0}
+#reason details.mv .more{margin-left:auto;font-size:10.5px;color:var(--dim);flex:0 0 auto}
+#reason details.mv[open] .more{visibility:hidden}
+#reason details.mv[open]>.mvr{margin-top:6px}
+/* fast 模式下的批量步：在步骤条与理由栏都标出「这一步一次填了几格」 */
+.steps li .nc{flex:0 0 auto;font-size:10px;color:#4f46e5;background:#eef2ff;border-radius:999px;padding:0 6px}
+#reason .ncell{font-size:10.5px;color:#4f46e5;background:#eef2ff;border-radius:999px;padding:0 6px}
 #diag{font-size:12.5px;white-space:pre-wrap;line-height:1.7;max-height:20vh}
 #diag .s{display:flex;gap:7px;align-items:flex-start;margin-bottom:5px}
 #diag .dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;margin-top:6px;background:var(--dim)}
@@ -135,7 +150,6 @@ button.pri:hover:not(:disabled){background:linear-gradient(180deg,#4a87f8,#3b7bf
 #reason .tech.guess{background:var(--warn-soft);color:var(--warn)}
 #reason .pos{font-family:Consolas,monospace;color:var(--txt);font-weight:600}
 #reason .val{font-weight:700;color:var(--ok)} #reason .val.g{color:var(--warn)}
-#reason .mv{border-top:1px dashed var(--line);margin-top:9px;padding-top:9px}
 #reason .mvh{display:flex;align-items:center;gap:7px;margin-bottom:4px}
 #reason .idx{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;
   background:var(--acc-soft);color:var(--acc2);font-size:11px;font-weight:700;flex:0 0 auto}
@@ -223,10 +237,14 @@ button.pri:hover:not(:disabled){background:linear-gradient(180deg,#4a87f8,#3b7bf
       <span class="chk">
         <label><input type="checkbox" id="cCands">候选数</label>
         <label><input type="checkbox" id="cElims" checked>排除步骤</label>
+        <label title="勾选：每步只填一格，逐步讲解；取消：同一次推理的多格合并成一步"><input type="checkbox" id="cMode" checked>一步一格</label>
       </span>
     </div>
     <div class="card"><h2>题目诊断</h2><div class="body" id="diag"></div></div>
-    <div class="card grow"><h2>本步理由 <span id="rIdx" style="font-weight:400"></span></h2><div class="body" id="reason"></div></div>
+    <div class="card grow">
+      <h2>本步理由 <span id="rIdx" style="font-weight:400"></span><button id="bExpand" class="lnk" title="展开/收起本步每一格的完整理由">展开逐格理由</button></h2>
+      <div class="body" id="reason"></div>
+    </div>
     <div class="card grow">
       <h2>步骤 <span id="sCnt" style="font-weight:400"></span></h2>
       <div class="steps" id="steps"><div class="empty">先填入已知数字，点「求解」</div></div>

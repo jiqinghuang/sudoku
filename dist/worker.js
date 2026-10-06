@@ -6,7 +6,8 @@
    importScripts 加载的 solver.js 与页面加载的是同一份 dist 产物
    （UMD 包装：无 module 时挂到全局 self.Sudoku）。
    消息契约（与 ui.ts 的 runTask、test.ts 的 [11] 段对应）：
-     收 { type:'solve', given, id }       → 回 { id, data: SolveResult }
+     收 { type:'solve', given, mode, id }   → 回 { id, data: SolveResult }
+     （mode:'fast' | 'teach' 原样转交 Sudoku.solve；省略等价于 fast，兼容旧客户端）
      收 { type:'generate', minClues, id }  → 回 { id, data: number[]（81 格谜面） }
      未知 type 一律忽略（不回复、不崩溃）。 */
 /* Worker 全局与页面共享 self 符号，但 DOM 类型库只认 Window——
@@ -15,8 +16,9 @@ const ctx = self;
 ctx.importScripts('solver.js');
 ctx.onmessage = (e) => {
     const msg = e.data;
+    // mode 原样转交 Sudoku.solve（fast / teach），保证 Worker 与主线程同步路径的步骤表一致
     if (msg.type === 'solve')
-        ctx.postMessage({ id: msg.id, data: Sudoku.solve(msg.given) });
+        ctx.postMessage({ id: msg.id, data: Sudoku.solve(msg.given, { mode: msg.mode }) });
     else if (msg.type === 'generate')
         ctx.postMessage({ id: msg.id, data: Sudoku.generatePuzzle(msg.minClues) });
 };

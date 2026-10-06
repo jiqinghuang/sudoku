@@ -36,11 +36,19 @@ type SolveResult =
   | { status: 'multi'; clues: number; msg: string; diff: string[]; steps: null }
   | { status: 'ok'; clues: number; steps: Step[]; final: number[]; stats: Record<string, number>; guesses: number; backtracks: number };
 
+/** 求解选项：
+    - mode:'fast'（默认）一步合并同类确定格，步数最少；
+    - mode:'teach'    把每步拆成「一格一步」，用于逐步讲解。
+      只在既有步骤表上做拆分，不重新推理——两条模式的推理路径与终盘完全一致。 */
+interface SolveOpts { mode?: 'fast' | 'teach' }
+
 interface SudokuAPI {
-  solve(given: number[]): SolveResult;
+  solve(given: number[], opts?: SolveOpts): SolveResult;
   findAll(given: number[], limit?: number): { solutions: number[][]; error?: boolean; msg?: string };
   generatePuzzle(minClues: number): number[];
   stateAt(given: number[], steps: Step[] | null, k: number): State;
+  /** 批量步的界面标签：一步一格（teach）模式与单格（fast）模式共用，避免文案漂移 */
+  TECH_LABEL(tech: string): string;
   ALL: number;
   RC(i: number): [number, number];
   nm(i: number): string;
@@ -360,27 +368,37 @@ interface SudokuAPI {
   }
 
   const TECH: Record<string, string> = { naked: '唯一候选数', hidden: '行/列/宫唯一', locked: '区块摒除',
-                 nakedSub: '显性数组', hiddenSub: '隐性数组', xwing: 'X-Wing',
+                 nakedSub: '显性三数组', hiddenSub: '隐性三数组', xwing: 'X-Wing',
                  guess: '试填(非唯一)', mixed: '混合' };
 
-  /* ---- 批量收集：同一盘面下所有互不依赖的确定格 ---- */
+  /* ---- 批量收集：同一盘面下「同一种技巧」的确定格 ----
+     返回值是「第一组」同技巧的格，不是全部确定格：
+     一次点击只讲一种推理模式（先唯一候选数、再各行/列/宫唯一），
+     用户看的是「这一步在用哪个技巧」，而不是一屏混着两种技巧的结论。
+     组内这些格互不依赖（都基于本步开始时的盘面判定），所以合并安全；
+     各组之间有依赖（前面的格填下去，后面的格可能本来就是唯一候选数），
+     因此一次只返回一组，交给下一轮重新判定。
+     回归：以前把 naked 与 hidden 混成一个 mixed 步，单步最多 28 格，
+     逐步讲解的颗粒度被压没了。 */
   function collectSingles(s: State): Move[] {
-    const moves: Move[] = [], used = new Uint8Array(81);
-    for (let i = 0; i < 81; i++) {                        // 唯一候选数
+    const naked: Move[] = [], used = new Uint8Array(81);
+    for (let i = 0; i < 81; i++) {                        // 组 1：唯一候选数
       if (s.val[i]) continue;
       const m = s.cand[i];
-      if (m && !(m & (m - 1))) { moves.push(makeNaked(s, i, valOfBit(m))); used[i] = 1; }
+      if (m && !(m & (m - 1))) { naked.push(makeNaked(s, i, valOfBit(m))); used[i] = 1; }
     }
-    for (let u = 0; u < 27; u++) {                        // 行/列/宫唯一
-      const uM = usedIn(s, u);
+    if (naked.length) return naked;
+    for (let u = 0; u < 27; u++) {                        // 组 2..n：行/列/宫唯一（按单元分组）
+      const uM = usedIn(s, u), group: Move[] = [];
       for (let d = 1; d <= 9; d++) {
         if (uM & bitOf(d)) continue;
         let spot = -1, cnt = 0;
         for (const i of UNITS[u]) if (!s.val[i] && (s.cand[i] & bitOf(d))) { spot = i; if (++cnt > 1) break; }
-        if (cnt === 1 && !used[spot]) { moves.push(makeHidden(s, u, spot, d)); used[spot] = 1; }
+        if (cnt === 1 && !used[spot]) { group.push(makeHidden(s, u, spot, d)); used[spot] = 1; }
       }
+      if (group.length) return group;                     // 只交出一个单元，其余下一轮再说
     }
-    return moves;
+    return [];
   }
 
   function makeBatchStep(moves: Move[]): PlaceStep {
@@ -388,12 +406,14 @@ interface SudokuAPI {
       const mv = moves[0];
       return { kind: 'place', moves, i: mv.i, v: mv.v, tech: mv.tech, reason: mv.reason, meta: mv.meta };
     }
+    const lines = moves.map((mv, k) => `${k + 1}. ${nm(mv.i)} = ${mv.v}（${TECH[mv.tech]}）`);
+    // collectSingles 已按技巧分组，同组技巧必然一致；这里仍分别统计，防止将来合并规则变化后文案失真
     const counts: Record<string, number> = {};
     for (const mv of moves) counts[mv.tech] = (counts[mv.tech] || 0) + 1;
-    const label = Object.keys(counts).map(t => `${TECH[t]}×${counts[t]}`).join('、');
-    const lines = moves.map((mv, k) => `${k + 1}. ${nm(mv.i)} = ${mv.v}（${TECH[mv.tech]}）`);
-    return { kind: 'place', moves, tech: 'mixed',
-      reason: `本步 ${moves.length} 格一次填入：${label}。\n` +
+    const techs = Object.keys(counts) as TechName[];
+    const label = techs.map(t => `${TECH[t]} × ${counts[t]}`).join('、');
+    return { kind: 'place', moves, tech: techs.length === 1 ? techs[0] : 'mixed',
+      reason: `本步 ${moves.length} 格一次填入（都是${label}）。\n` +
         `这些都是基于本步开始时的盘面就能确定的格子——各自的理由互相独立、谁也不依赖谁，先后顺序不影响结果，可以放心一次填入。\n` +
         `逐格结论：\n${lines.join('\n')}` };
   }
@@ -500,8 +520,23 @@ interface SudokuAPI {
     return s;
   }
 
+  /** 一步一格（讲解模式）：把每个批量填数步拆成「一格一步」。
+      纯粹是展示层拆分——不改动推理路径，stateAt 逐步回放的终盘与 fast 模式完全相同。
+      拆分后的每格沿用原步的技巧标签与自己的理由/高亮（这些理由都是在
+      「本步开始时的盘面」下算出来的，对同一批的每一格都成立）。 */
+  function expandSteps(steps: Step[]): Step[] {
+    const out: Step[] = [];
+    for (const st of steps) {
+      if (st.kind !== 'place' || st.moves.length === 1) { out.push(st); continue; }
+      for (const mv of st.moves) {
+        out.push({ kind: 'place', moves: [mv], i: mv.i, v: mv.v, tech: st.tech, reason: mv.reason, meta: mv.meta });
+      }
+    }
+    return out;
+  }
+
   /** 主入口 */
-  function solve(given: number[]): SolveResult {
+  function solve(given: number[], opts?: SolveOpts): SolveResult {
     const r0 = init(given);
     if (r0.error) return { status: 'invalid', msg: r0.msg };
     const clues = given.filter(Boolean).length;
@@ -518,9 +553,11 @@ interface SudokuAPI {
     }
     const guesses = stats.guess || 0;
     const backtracks = stats.backtracks || 0;
+    const present = (steps: Step[], final: number[]): SolveResult =>
+      ({ status: 'ok', clues, steps: opts?.mode === 'teach' ? expandSteps(steps) : steps, final, stats, guesses, backtracks });
     if (guesses === 0) {
       // 每一步都是保持解集不变的确定性推理，最终得到唯一终盘 ⇒ 题目唯一解
-      return { status: 'ok', clues, steps: r.steps, final: r.solution, stats, guesses: 0, backtracks };
+      return present(r.steps, r.solution);
     }
     const sols = findAll(given, 2).solutions;
     if (sols.length === 0) return { status: 'nosol', clues, backtracks, msg: '题目无解。请检查已知数字的输入。' };
@@ -530,7 +567,7 @@ interface SudokuAPI {
       return { status: 'multi', clues, msg: `题目不唯一：至少存在 2 个不同解，无法给出唯一步骤。\n差异格：${diff.slice(0, 8).join('；')}${diff.length > 8 ? ` …共 ${diff.length} 格` : ''}\n💡 多半是已知数字太少，再补几个已知数就能变成唯一解。`,
                diff, steps: null };
     }
-    return { status: 'ok', clues, steps: r.steps, final: sols[0], stats, guesses, backtracks };
+    return present(r.steps, sols[0]);
   }
 
   /* ---- 题目生成：先随机终盘，再挖空，每次保证唯一解 ---- */
@@ -565,5 +602,5 @@ interface SudokuAPI {
     return p;
   }
 
-  return { solve, findAll, generatePuzzle, stateAt, ALL, RC, nm, ln, bits, pop, PEERS, UNITS, RNAME, TECH };
+  return { solve, findAll, generatePuzzle, stateAt, TECH_LABEL: (t: string): string => TECH[t], ALL, RC, nm, ln, bits, pop, PEERS, UNITS, RNAME, TECH };
 });

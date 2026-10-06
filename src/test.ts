@@ -15,7 +15,7 @@ function section(name: string, fn: () => void): void {
 
 // solve() 的返回是按 status 区分的联合类型；测试断言跟随运行时结果，
 // 统一经此解包，保持与原 test.js 相同的松散访问风格。
-const solve = (g: number[]): any => Sudoku.solve(g);
+const solve = (g: number[], opts?: { mode?: 'fast' | 'teach' }): any => Sudoku.solve(g, opts);
 
 const parse = (s: string): number[] => s.replace(/[^0-9]/g, '').split('').map(Number);
 const WIKI_G: number[] = parse(`530070000600195000098000060800060003400803001700020006060000280000419005000080079`);
@@ -121,22 +121,33 @@ section('3 每一步的理由与合法性', () => {
     ok(bad === 0, '每步都基于当时盘面合法 (' + bad + ' 处异常)');
     const filled = r.steps.reduce((n: number, s: any) => n + (s.kind === 'place' ? s.moves.length : 0), 0);
     ok(filled === 81 - WIKI_G.filter(Boolean).length, `填数步数 ${filled} == 空格数 ${81 - WIKI_G.filter(Boolean).length}`);
-    // 隐性唯一数的理由里「已填 N 格」必须与实际一致
+    // 隐性唯一数的理由里「已填 N 格」必须与实际一致。
+    // 注意：批量步改成「按技巧分组的确定格」后，隐性唯一数是 naked 全部填完之后才轮到的技巧，
+    // 经典题全程都能用唯一候选数推完（0 条 hidden），因此这里跨多道题取样，而不是只查这一道。
+    const parseDots = (s: string): number[] => s.split('').map(c => c === '.' ? 0 : +c);
+    const samples: number[][] = [WIKI_G,
+      parseDots('..46..9......9...8...34.5...5...14...2.....9.7.....856..15.7..4.8.4...3..........'),
+      parseDots('.7..28...32....59...........1.....468.4.9.1......3.....6.28..5....9.4.7.1........')];
+    for (let t = 0; t < 4; t++) samples.push(Sudoku.generatePuzzle([34, 28, 28, 24][t]));
     let wrongCount = 0, hiddenN = 0;
-    for (let k = 1; k <= r.steps.length; k++) {
-      const st = r.steps[k - 1];
-      if (st.kind !== 'place') continue;
-      const s = Sudoku.stateAt(WIKI_G, r.steps, k - 1);
-      for (const mv of st.moves) {
-        if (mv.tech !== 'hidden') continue;
-        hiddenN++;
-        const unit = /【(.+?)唯一】/.exec(mv.reason)![1];
-        let u: number;
-        if (unit.endsWith('行')) u = +unit.slice(1, -1) - 1;
-        else if (unit.endsWith('列')) u = 9 + +unit.slice(1, -1) - 1;
-        else u = 18 + +unit.slice(1, -1) - 1;
-        const filled = Sudoku.UNITS[u].filter(i => s.val[i]).length;
-        if (+/已填 (\d+) 格/.exec(mv.reason)![1] !== filled) wrongCount++;
+    for (const g of samples) {
+      const rr = solve(g);
+      if (rr.status !== 'ok') continue;
+      for (let k = 1; k <= rr.steps.length; k++) {
+        const st = rr.steps[k - 1];
+        if (st.kind !== 'place') continue;
+        const s = Sudoku.stateAt(g, rr.steps, k - 1);
+        for (const mv of st.moves) {
+          if (mv.tech !== 'hidden') continue;
+          hiddenN++;
+          const unit = /【(.+?)唯一】/.exec(mv.reason)![1];
+          let u: number;
+          if (unit.endsWith('行')) u = +unit.slice(1, -1) - 1;
+          else if (unit.endsWith('列')) u = 9 + +unit.slice(1, -1) - 1;
+          else u = 18 + +unit.slice(1, -1) - 1;
+          const filled = Sudoku.UNITS[u].filter(i => s.val[i]).length;
+          if (+/已填 (\d+) 格/.exec(mv.reason)![1] !== filled) wrongCount++;
+        }
       }
     }
     ok(hiddenN > 0 && wrongCount === 0, `隐性唯一数理由的「已填 N 格」与实际一致（${hiddenN} 条，${wrongCount} 条错误）`);
@@ -258,10 +269,13 @@ section('9 技巧回归：隐性数组 / X-Wing 必须能触发（旧版隐性�
   }
 });
 
-section('10 批量填数：一步多格且互不依赖', () => {
+section('10 批量填数：一步多格、同技巧、互不依赖', () => {
   const multi = r.steps.filter((s: any) => s.kind === 'place' && s.moves.length > 1);
   const maxN = Math.max(0, ...multi.map((s: any) => s.moves.length));
   ok(multi.length > 0, `存在多格步骤（${multi.length} 步批量，单步最多 ${maxN} 格）`);
+  // 分组回归：以前同一批里 naked 与 hidden 混着塞，单步最多 28 格，逐格讲解被压没
+  ok(multi.every((s: any) => new Set(s.moves.map((m: any) => m.tech)).size === 1),
+    '每个批量步只含一种技巧（不再混技巧）');
   const totalPlaced = r.steps.reduce((n: number, s: any) => n + (s.kind === 'place' ? s.moves.length : 0), 0);
   ok(totalPlaced === 81 - WIKI_G.filter(Boolean).length, `总填格数 ${totalPlaced} == 空格数 ${81 - WIKI_G.filter(Boolean).length}`);
   let bad = 0;
@@ -298,14 +312,54 @@ section('11 Worker 协议：dist/worker.js 与 ui.ts 的消息契约', () => {
   initWorker(stubSelf, Sudoku);
   const fire = (msg: any): any => { posted.length = 0; stubSelf.onmessage({ data: msg }); return posted[0]; };
 
-  const a = fire({ type: 'solve', given: WIKI_G, id: 7 });
+  const a = fire({ type: 'solve', given: WIKI_G, id: 7, mode: 'fast' });
   ok(a && a.id === 7 && a.data.status === 'ok', 'solve：回带请求 id，status=ok');
   ok(a.data.final.join('') === WIKI_S.join(''), 'solve：解与标准答案一致');
-  ok(JSON.stringify(a.data.steps) === JSON.stringify(solve(WIKI_G).steps), 'solve：步骤表与主线程求解完全一致');
+  ok(JSON.stringify(a.data.steps) === JSON.stringify(solve(WIKI_G, { mode: 'fast' }).steps), 'solve：步骤表与主线程求解完全一致');
+  // mode 必须一路透传到 Sudoku.solve：讲解模式下 Worker 也要回一步一格的步骤表
+  const a2 = fire({ type: 'solve', given: WIKI_G, id: 10, mode: 'teach' });
+  ok(a2 && a2.id === 10 && a2.data.steps.every((s: any) => s.kind !== 'place' || s.moves.length === 1),
+    'solve：mode=teach 时 Worker 返回一步一格的步骤表');
+  ok(a2.data.steps.length > a.data.steps.length, `solve：teach 步数多于 fast（${a2.data.steps.length} > ${a.data.steps.length}）`);
+  ok(a2.data.final.join('') === a.data.final.join(''), 'solve：两种 mode 的终盘一致');
+  const a3 = fire({ type: 'solve', given: WIKI_G, id: 11 });            // 老客户端不带 mode
+  ok(a3.data.steps.length === a.data.steps.length, 'solve：省略 mode 时与 fast 一致（向后兼容）');
   const b = fire({ type: 'generate', minClues: 34, id: 8 });
   ok(b && b.id === 8 && Array.isArray(b.data) && b.data.length === 81, 'generate：回带 id，产出 81 格谜面');
   ok(b.data.filter(Boolean).length >= 24 && solve(b.data).status === 'ok', 'generate：谜面唯一可解');
   ok(fire({ type: 'unknown', id: 9 }) === undefined, '未知消息类型被忽略（不回复、不崩溃）');
+});
+
+section('12 讲解模式（mode=teach）：一步一格，且与 fast 模式同解同量', () => {
+  const given = Sudoku.generatePuzzle(28);
+  const fast = solve(given);
+  const teach = solve(given, { mode: 'teach' });
+  const cells = (x: any): number => x.steps.reduce((n: number, s: any) => n + (s.kind === 'place' ? s.moves.length : 0), 0);
+  ok(teach.status === 'ok' && teach.steps.length > 0, `teach 求解成功（${teach.steps.length} 步）`);
+  ok(teach.steps.every((s: any) => s.kind !== 'place' || s.moves.length === 1), '每步最多填一格');
+  ok(teach.steps.length >= fast.steps.length, `teach 步数不少于 fast（${teach.steps.length} >= ${fast.steps.length}）`);
+  ok(cells(teach) === cells(fast), `填格总数一致（${cells(teach)} / ${cells(fast)}）`);
+  // 排除步不是填数，不该被拆分
+  ok(teach.steps.filter((s: any) => s.kind === 'elim').length === fast.steps.filter((s: any) => s.kind === 'elim').length,
+    '排除步数量不变（不参与拆分）');
+  const fEnd = Array.from(Sudoku.stateAt(given, fast.steps, fast.steps.length).val).join('');
+  const tEnd = Array.from(Sudoku.stateAt(given, teach.steps, teach.steps.length).val).join('');
+  ok(fEnd === tEnd && tEnd === fast.final.join(''), '两种模式回放到底都是同一个解');
+  // 拆分是纯展示层改动：每一步填的值都必须在「拆分后自己那一步」的时刻仍然合法
+  let bad = 0;
+  for (let k = 1; k <= teach.steps.length; k++) {
+    const st = teach.steps[k - 1];
+    if (st.kind !== 'place') continue;
+    const s = Sudoku.stateAt(given, teach.steps, k - 1);
+    const mv = st.moves[0];
+    if (s.val[mv.i] || !(s.cand[mv.i] & (1 << (mv.v - 1)))) bad++;
+    if (!mv.reason || !mv.reason.includes('【')) bad++;
+  }
+  ok(bad === 0, `拆分后每步仍基于当时盘面合法且带理由（${bad} 处异常）`);
+  // 异常题在 teach 模式下也不能产生步骤表
+  const bad2 = given.slice(); bad2[0] = bad2[1] = given.find(Boolean) as number;
+  const inv = solve(bad2, { mode: 'teach' });
+  ok(inv.status !== 'ok' || inv.steps.length === 0, `异常题在 teach 模式下不产生步骤（status=${inv.status}）`);
 });
 
 console.log(`\n========== 通过 ${pass} / 失败 ${fail} ==========`);

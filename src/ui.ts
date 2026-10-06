@@ -6,6 +6,13 @@ const board = $('#board'), pad = $('#pad');
 let given: number[] = new Array(81).fill(0);
 let steps: Step[] = [], cur = 0, sel = 40,
     playing: number | null = null, showCands = false, showElims = true;
+/* 讲解模式：一步一格（true，默认）还是同类确定格合并成一步（false）。
+   两条模式都来自同一次推理，只是步骤表的展示粒度不同——见 solver.solve 的 opts.mode。 */
+let stepMode = true;
+/* 讲解模式下用来标注「这 N 步其实是同一次推理」的原始推理步数，由 applySteps 还原 */
+let teachBatchSteps = 0;
+/* 批量步的逐格理由是否展开：'步骤序号:格序' 集合，折叠状态跨重绘保留 */
+const openMoves = new Set<string>();
 
 /* ---- 状态折叠由 solver.js 的 Sudoku.stateAt(given, steps, k) 提供 ---- */
 
@@ -28,7 +35,8 @@ const bitsOf = Sudoku.bits;
    任务一定以「成功回调」或 fail 回调结束：同步求解抛错、postMessage 投递失败、
    Worker 内异常回退重试再抛错，都由 settle() 兜住，保证调用方的 setBusy(false)
    必定执行——否则按钮会永久停在禁用态、状态标签永远显示「求解中…」。 */
-type TaskMsg = { type: 'solve'; given: number[] } | { type: 'generate'; minClues: number };
+type SolveMsg = { type: 'solve'; given: number[]; mode: 'fast' | 'teach' };
+type TaskMsg = SolveMsg | { type: 'generate'; minClues: number };
 interface PendingTask { msg: TaskMsg; fn: (data: any) => void; fail: (err: unknown) => void }
 
 let worker: Worker | null = null, workerBroken = false, taskId = 0, busy = false, epoch = 0;
@@ -37,7 +45,7 @@ try { worker = new Worker('dist/worker.js'); }
 catch (e) { workerBroken = true; console.warn('[worker] 不可用，改为主线程同步求解：' + (e as Error).message); }
 
 const runSync = (msg: TaskMsg): any =>
-  msg.type === 'solve' ? Sudoku.solve(msg.given) : Sudoku.generatePuzzle(msg.minClues);
+  msg.type === 'solve' ? Sudoku.solve(msg.given, { mode: msg.mode }) : Sudoku.generatePuzzle(msg.minClues);
 
 /* 同步执行并兜住异常：这是「派发失败后重试」与「无 Worker 直接同步」两条路径的共同出口。 */
 function settle(p: PendingTask): void {
@@ -92,6 +100,28 @@ function buildBoard(): void {
     board.appendChild(el);
     cellEls.push({ el, v, cands, badge });
   }
+}
+
+/* ---- 步骤表装载：把求解结果写入当前步骤表。
+   求解始终先跑 fast 模式拿到「规范步骤表」，再由 solver 按 mode 拆成一步一格——
+   两条模式的推理路径与终盘因此完全一致，只是展示粒度不同。
+   cur 夹在新表长度内：切模式后不会停在不存在的步号上。 ---- */
+function applySteps(data: any): void {
+  steps = data.steps || [];
+  // 讲解模式下，一个 fast 步会被拆成多步贴在一起，它们属于同一次推理：据此还原「推理步数」
+  const before = (k: number): number[] => Array.from(Sudoku.stateAt(given, steps, k).val);
+  let bs = 0, prev = -1;
+  for (let k = 1; k <= steps.length; k++) {
+    const st = steps[k - 1];
+    if (st.kind !== 'place') continue;
+    if (steps[k] === undefined) break;                  // 末尾整批尚未落盘：不计入已完成批次
+    const v = before(k); let applied = 0;
+    for (const mv of st.moves) if (v[mv.i]) applied++;
+    if (applied > 0 && applied !== prev) bs++;          // 已落盘格数跳变 = 进入下一批
+    prev = applied;
+  }
+  teachBatchSteps = bs;
+  if (cur > steps.length) cur = steps.length;
 }
 
 function stepMeta(st: Step): { units: Set<number>; focus: Set<number>; marks: Record<string, StepMetaMarks> } {
@@ -167,7 +197,7 @@ function render(): void {
 }
 
 const TECHN: Record<string, string> = { naked: '唯一候选数', hidden: '行/列/宫唯一', locked: '区块摒除',
-                nakedSub: '显性数组', hiddenSub: '隐性数组', xwing: 'X-Wing',
+                nakedSub: '显性三数组', hiddenSub: '隐性三数组', xwing: 'X-Wing',
                 guess: '试填（非唯一）', mixed: '混合' };
 
 function techLabel(st: Step): string {
@@ -177,25 +207,41 @@ function techLabel(st: Step): string {
   return Object.keys(c).map(t => `${TECHN[t]}×${c[t]}`).join('、');
 }
 
-function moveHead(mv: Move, showIdx: boolean, k = 0): string {
+function moveHead(mv: Move, showIdx: boolean, k = 0, stepSize = 0): string {
   const isG = mv.tech === 'guess';
   const idx = showIdx ? `<span class="idx">${k + 1}</span>` : '';
   const tag = showIdx ? `<span class="tech${isG ? ' guess' : ''}">${TECHN[mv.tech]}</span>` : '';
-  return `<div class="mvh">${idx}${tag}<span class="pos">${Sudoku.nm(mv.i)}</span> → <span class="val${isG ? ' g' : ''}">${mv.v}</span></div>`;
+  const n = stepSize > 1 ? `<span class="ncell">${stepSize} 格</span>` : '';
+  return `<div class="mvh">${idx}${tag}${n}<span class="pos">${Sudoku.nm(mv.i)}</span> → <span class="val${isG ? ' g' : ''}">${mv.v}</span></div>`;
 }
 
 const legend = (): string => '<div class="lgd"><span class="lg u"></span>涉及单元<span class="lg f"></span>推理格<span class="lg s"></span>排除候选</div>';
+
+/* 批量步的逐格理由：每格一条「第 N 步 · 技巧 · 格 → 值」摘要，点开看完整推理。
+   以前所有理由平铺在一起，单步最多 28 格时一屏糊住、找不到重点；
+   现在默认只展开第一条，其余点开（openMoves 记住展开状态，重绘不丢）。 */
+function moveList(st: PlaceStep, stepIdx: number): string {
+  return st.moves.map((mv, k) => {
+    const key = `${stepIdx}:${k}`;
+    const open = openMoves.has(key) || (k === 0 && !st.moves.some((_, j) => openMoves.has(`${stepIdx}:${j}`)));
+    return `<details class="mv" data-mvk="${key}"${open ? ' open' : ''}>` +
+      `<summary class="mvs">${moveHead(mv, true, k)}<span class="more">展开理由</span></summary>` +
+      `<div class="mvr">${esc(mv.reason).replace(/\n/g, '<br>')}</div></details>`;
+  }).join('');
+}
 
 function renderReason(): void {
   const box = $('#reason'), idx = $('#rIdx');
   if (!steps.length) { box.innerHTML = '<div class="t">—</div>暂无步骤'; idx.textContent = ''; return; }
   if (cur === 0) { box.innerHTML = '<div class="t">—</div>已回到初始谜面，点「下一步」开始逐步推理。'; idx.textContent = ''; return; }
   const st = steps[cur - 1];
-  idx.textContent = `第 ${cur} / ${steps.length} 步`;
+  idx.textContent = st.kind === 'place' && st.moves.length > 1
+    ? `第 ${cur} / ${steps.length} 步 · 本步 ${st.moves.length} 格`
+    : `第 ${cur} / ${steps.length} 步`;
   if (st.kind === 'place' && st.moves.length > 1) {
     box.innerHTML = `<div class="t"><span class="tech">本步 ${st.moves.length} 格</span>${esc(techLabel(st))}</div>` +
-      st.moves.map((mv, k) => `<div class="mv">${moveHead(mv, true, k)}<div class="mvr">${esc(mv.reason).replace(/\n/g, '<br>')}</div></div>`).join('') +
-      legend();
+      moveList(st, cur - 1) + legend();
+    wireMoveToggles();
     return;
   }
   if (st.kind === 'place') {
@@ -216,6 +262,18 @@ function stepText(st: Step): string {
   return `${Sudoku.nm(st.cells[0])}${st.cells.length > 1 ? ` 等${st.cells.length}格` : ''} 排除 {${bitsOf(st.mask).join(',')}}`;
 }
 
+/* details 展开状态在 innerHTML 重建后会丢，这里把用户的点开/收起记进 openMoves。
+   onclick 的 this 是 #reason（事件冒泡到容器），从 closest 反查是哪一个 details。 */
+function wireMoveToggles(): void {
+  const box = $('#reason');
+  box.onclick = function (e: any): void {
+    const t = e && e.target && e.target.closest ? e.target.closest('details.mv') : null;
+    if (!t || !box.contains(t)) return;
+    const key = t.dataset.mvk;
+    if (t.open) openMoves.add(key); else openMoves.delete(key);
+  };
+}
+
 function renderSteps(): void {
   const el = $('#steps');
   if (!steps.length) { el.innerHTML = '<div class="empty">先填入已知数字，点「求解」</div>'; $('#sCnt').textContent = ''; return; }
@@ -227,7 +285,8 @@ function renderSteps(): void {
     const n = i + 1, on = n === cur, past = n < cur;
     const isG = s.kind === 'place' && s.moves.every(m => m.tech === 'guess');
     const k = s.kind === 'elim' ? 'e' : isG ? 'g' : s.tech === 'mixed' ? 'm' : '';
-    return `<li class="${k} ${on ? 'on' : ''} ${past ? 'past' : ''}" data-n="${n}"><span class="n">${n}</span><span class="k">${esc(techLabel(s))}</span><span class="x">${esc(stepText(s))}</span></li>`;
+    const ncell = s.kind === 'place' && s.moves.length > 1 ? `<span class="nc">${s.moves.length}格</span>` : '';
+    return `<li class="${k} ${on ? 'on' : ''} ${past ? 'past' : ''}" data-n="${n}"><span class="n">${n}</span><span class="k">${esc(techLabel(s))}</span>${ncell}<span class="x">${esc(stepText(s))}</span></li>`;
   }).join('') + '</ol>';
   const on = el.querySelector('li.on'); if (on) on.scrollIntoView({ block: 'nearest' });
   el.querySelectorAll('li').forEach((li: any) => li.onclick = () => { stop(); cur = +li.dataset.n; render(); });
@@ -244,10 +303,10 @@ function setState(t: string, cls?: string): void {   // cls: ok / err / warn，�
 
 function doSolve(): void {
   if (busy) return;                              // 已有任务在途，忽略重复触发
-  stop(); cur = 0; steps = [];
+  stop(); cur = 0; steps = []; teachBatchSteps = 0;   // 清干净：否则上一次的「推理步数」会残留到本次诊断里
   const ep = epoch;                              // 记下谜面版本：等待期间谜面变了就丢弃结果
   setBusy(true); setState('求解中…');
-  runTask({ type: 'solve', given }, (res: SolveResult) => {
+  runTask({ type: 'solve', given, mode: stepMode ? 'teach' : 'fast' }, (res: SolveResult) => {
     setBusy(false);
     if (ep !== epoch) return;                     // 过期结果：谜面已被修改，等用户重新求解
     const clues = given.filter(Boolean).length;
@@ -256,7 +315,7 @@ function doSolve(): void {
     if (res.status === 'nosol') { setState('无解', 'err'); diag(h + row('bad', '❌ ' + esc(res.msg))); render(); return; }
     if (res.status === 'multi') { setState('多解', 'err'); diag(h + row('bad', '❌ ' + esc(res.msg).replace(/\n/g, '<br>'))
       + row('info', '需先补充已知数字使其唯一，才能给出确定步骤。')); render(); return; }
-    steps = res.steps || [];                       // 关键：把求解结果接到回放用的步骤表
+    applySteps(res);                               // 关键：把求解结果接到回放用的步骤表
     h += row('ok', '✅ 唯一解（已验证解的数量 = 1）');
     if (res.guesses) h += row('warn', `⚠ 含 <b>${res.guesses}</b> 步试填（逻辑推理已无法推进），这些步已标黄，不具备唯一性。`);
     else h += row('ok', '全程仅用唯一性逻辑推理，无需试填。');
@@ -264,6 +323,8 @@ function doSolve(): void {
     const t = res.stats || {};
     h += row('info', '技巧统计：' + (Object.keys(TECHN).filter(k => t[k]).map(k => `${TECHN[k]}×${t[k]}`).join('，') || '无'));
     if (!steps.length) h += row('warn', '题目已填满，无需推理。');
+    else if (stepMode && teachBatchSteps && steps.length > teachBatchSteps)
+      h += row('info', `讲解模式：一步一格，共 ${steps.length} 步；每步左上角的「第 N 步」标注同属第 N 次推理。`);
     diag(h);
     setState(`共 ${steps.length} 步${res.guesses ? '（含试填）' : ''}`,
              steps.length === 0 ? '' : res.guesses ? 'warn' : 'ok');
@@ -289,7 +350,7 @@ function play(): void {
 /* ---- 键盘 / 按钮 ---- */
 function editGiven(i: number, v: number): boolean {   // 键盘与数字键盘共用，避免两条路径行为不一致
   if (busy) return false;   // 任务在途时忽略改谜面：否则刚填的数字会被同批在途的出题结果静默覆盖
-  stop(); epoch++; given[i] = v; steps = []; cur = 0;
+  stop(); epoch++; given[i] = v; steps = []; cur = 0; teachBatchSteps = 0;
   setState('未解题');
   diag(row('info', '已修改谜面，点「求解」重新生成步骤。'));
   return true;
@@ -308,12 +369,28 @@ $('#bPlay').onclick = play;
 $('#spd').oninput = () => { if (playing) { stop(); if (cur < steps.length) play(); } };   // 播放中调速立即生效
 $('#cCands').onchange = (e: any) => { showCands = e.target.checked; render(); };
 $('#cElims').onchange = (e: any) => { showElims = e.target.checked; renderSteps(); };
-$('#bClr').onclick = () => { stop(); epoch++; given = new Array(81).fill(0); steps = []; cur = 0; sel = 40;
+/* 换讲解粒度：已求解的盘面直接重算一份步骤表，不必让用户再点一次「求解」。
+   重算走同一条 runTask（Worker 或同步回退），epoch 未变，过期结果仍按版本丢弃。 */
+$('#cMode').onchange = (e: any) => {
+  stepMode = e.target.checked;
+  openMoves.clear();
+  if (steps.length) doSolve(); else render();
+};
+$('#bExpand').onclick = () => {
+  const st = cur > 0 ? steps[cur - 1] : null;
+  if (!st || st.kind !== 'place' || st.moves.length < 2) return;   // 只对批量步有意义
+  const n = st.moves.length;
+  const expanded = st.moves.every((_, k) => openMoves.has(`${cur - 1}:${k}`));
+  if (expanded) openMoves.clear();                                 // 收起 = 恢复「只展开第一条」
+  else for (let k = 0; k < n; k++) openMoves.add(`${cur - 1}:${k}`);
+  renderReason();
+};
+$('#bClr').onclick = () => { stop(); epoch++; given = new Array(81).fill(0); steps = []; cur = 0; sel = 40; teachBatchSteps = 0;
   setState('未解题');
   diag(row('info', '空白盘面，点数字键填入已知数字。')); render(); };
 (document.querySelectorAll('[data-gen]') as NodeListOf<HTMLElement>).forEach(b => b.onclick = () => {
   if (busy) return;                               // 出题中/求解中，忽略重复点击
-  stop(); steps = []; cur = 0; epoch++;           // 换题使在途求解结果失效
+  stop(); steps = []; cur = 0; epoch++; teachBatchSteps = 0;   // 换题使在途求解结果失效
   const ep = epoch;
   setBusy(true); setState('出题中…');
   runTask({ type: 'generate', minClues: +(b.dataset.gen as string) }, (p: number[]) => {

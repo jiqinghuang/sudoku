@@ -72,6 +72,10 @@ interface UiApi {
   bitsOf(m: number): number[];
   readonly cur: number; readonly steps: Step[]; readonly sel: number;
   given: number[];
+  /* 讲解模式开关与逐格理由折叠状态：供 U9/U10 直接驱动，与界面控件同一份模块状态 */
+  stepMode: boolean;
+  moveOpen(key: string): boolean;
+  toggleExpand(): void;
 }
 
 /* 每次调用都跑出一份全新的界面实例（模块级状态相互独立），供 U8 反复注入不同的 Worker。 */
@@ -79,10 +83,22 @@ const loadUi = (): UiApi => new Function('document', 'addEventListener', 'alert'
   ;return { doSolve, goto, stop, editGiven, bitsOf,
            get cur() { return cur; }, get steps() { return steps; },
            get sel() { return sel; },
+           get stepMode() { return stepMode; }, set stepMode(v) { stepMode = v; },
+           moveOpen: (k) => openMoves.has(k),
+           toggleExpand: () => $('#bExpand').onclick(),
            get given() { return given; }, set given(v) { given = v; } };
 `)(document, (type: string, fn: (e: any) => void): void => { if (type === 'keydown') keyHandler = fn; }, (): void => {}, Sudoku) as UiApi;
 
 const api = loadUi();
+
+/* 取一个「干净」的界面实例：清空共享的 DOM stub 缓存。
+   缓存是按选择器共享的，不清空的话 $('#x').onclick 绑的是最后一次 loadUi 的闭包
+   （U8 的 W5），而断言读的却是自己实例的状态——两边不是同一个实例，测试会假失败。
+   真实页面只有一个 ui.js 实例，不存在这个问题。 */
+const freshUi = (): UiApi => {
+  for (const k of Object.keys(cache)) delete cache[k];
+  return loadUi();
+};
 
 const WIKI = '530070000600195000098000060800060003400803001700020006060000280000419005000080079'
   .split('').map(Number);
@@ -184,17 +200,25 @@ section('U5 键盘/数字键盘修改谜面路径一致，状态标签不残留'
   ok(cache['#board'].children.length === 81, `多次重绘后棋盘节点不重复堆积（${cache['#board'].children.length} 格）`);
 });
 
-section('U6 批量步骤的界面渲染', () => {
-  api.given = WIKI.slice(); api.doSolve();            // U5 改过谜面，这里重新求解
-  const bi = api.steps.findIndex(s => s.kind === 'place' && s.moves.length > 1);
-  const batch = api.steps[bi] as PlaceStep | undefined;
-  ok(bi >= 0 && !!batch, `存在批量步骤（第 ${bi + 1} 步，${batch ? batch.moves.length : 0} 格）`);
+section('U6 批量步骤的界面渲染与技巧分组（fast 模式）', () => {
+  api.given = WIKI.slice();
+  api.stepMode = false; api.doSolve();                // 批量步只在 fast 模式出现
+  const batch = api.steps.find(s => s.kind === 'place' && s.moves.length > 1) as PlaceStep | undefined;
+  ok(!!batch, `存在批量步骤（${batch ? batch.moves.length : 0} 格）`);
+  const techs = batch ? [...new Set(batch.moves.map(m => m.tech))] : [];
+  ok(techs.length === 1, `批量步只含一种技巧（实际 ${techs.map(t => Sudoku.TECH_LABEL(t)).join('、') || '无'}）`);
+  const mixedN = api.steps.filter(s => s.kind === 'place'
+    && new Set((s as PlaceStep).moves.map(m => m.tech)).size !== 1).length;
+  ok(mixedN === 0, `全表没有混技巧的步骤（${mixedN} 步）`);
+
+  const bi = api.steps.indexOf(batch!);
   api.goto(bi + 1);
   const html = cache['#reason'].innerHTML;
   const st = batch!;
   ok(new RegExp(`本步 ${st.moves.length} 格`).test(html), '理由面板显示本步格数');
   ok(st.moves.every(mv => html.includes(Sudoku.nm(mv.i))), '理由面板列出每一格的推理');
   ok(/涉及单元/.test(html) && /推理格/.test(html), '理由面板带图例');
+  ok(cache['#rIdx'].textContent.includes('本步'), `标题标出本步格数: "${cache['#rIdx'].textContent}"`);
   ok(cache['#sCnt'].textContent.includes(`填数 ${st.moves.length}`) || /填数 \d+/.test(cache['#sCnt'].textContent), `步骤计数按格统计: "${cache['#sCnt'].textContent}"`);
 });
 
@@ -268,6 +292,59 @@ section('U8 Worker 分支：正常应答 / 各类失败降级均不卡死', () =
     console.warn = savedWarn;
     if (savedWorker === undefined) delete g.Worker; else g.Worker = savedWorker;
   }
+});
+
+section('U9 讲解模式开关：一步一格，且切模式后仍与唯一解一致', () => {
+  const u = freshUi();
+  u.given = WIKI.slice();
+  u.stepMode = false; u.doSolve();
+  const fastN = u.steps.length;
+  const fastCells = u.steps.reduce((n, s) => n + (s.kind === 'place' ? s.moves.length : 0), 0);
+
+  u.stepMode = true; u.doSolve();                     // 默认即讲解模式，这里显式设定，不依赖上一段
+  const teachN = u.steps.length;
+  const onePerStep = u.steps.every(s => s.kind !== 'place' || s.moves.length === 1);
+  ok(onePerStep, '讲解模式：每个填数步都只有一格');
+  ok(teachN > fastN, `讲解模式步数多于 fast 模式（${teachN} > ${fastN}）`);
+  const teachCells = u.steps.reduce((n, s) => n + (s.kind === 'place' ? s.moves.length : 0), 0);
+  ok(teachCells === fastCells, `两种模式填格总数一致（${teachCells} / ${fastCells}）`);
+  ok(/讲解模式/.test(cache['#diag'].innerHTML), '诊断面板说明当前是讲解模式（一步一格）');
+  const teachEnd = Array.from(Sudoku.stateAt(WIKI, u.steps, u.steps.length).val).join('');
+
+  u.stepMode = false; u.doSolve();
+  const fastEnd = Array.from(Sudoku.stateAt(WIKI, u.steps, u.steps.length).val).join('');
+  ok(teachEnd === fastEnd && fastEnd === solveAny(WIKI).final.join(''), '两种模式回放到底都是同一个唯一解');
+  ok(u.cur === 0 && u.steps.length > 0 && fastN > 0, `切模式后步骤表可用且回到开头（fast ${fastN} / teach ${teachN} 步）`);
+});
+
+section('U10 逐格理由可折叠：默认只开一条，展开按钮与状态保留', () => {
+  const u = freshUi();
+  u.given = WIKI.slice();
+  u.stepMode = false; u.doSolve();
+  const batch = u.steps.find(s => s.kind === 'place' && s.moves.length > 2) as PlaceStep | undefined;
+  ok(!!batch, `存在多格批量步（${batch ? batch.moves.length : 0} 格）`);
+  const bi = u.steps.indexOf(batch!);
+  const n = batch!.moves.length;
+
+  u.goto(bi + 1);
+  const html = cache['#reason'].innerHTML;
+  ok((html.match(/<details/g) || []).length === n, `每格一个可折叠块（${(html.match(/<details/g) || []).length} / ${n}）`);
+  ok((html.match(/<details[^>]*\bopen\b/g) || []).length === 1, '默认只展开第一条理由');
+  ok(/展开理由/.test(html) && /<summary/.test(html), '折叠标题带摘要行');
+
+  u.toggleExpand();                                   // 展开全部
+  const openAll = (cache['#reason'].innerHTML.match(/<details[^>]*\bopen\b/g) || []).length;
+  ok(openAll === n, `「展开逐格理由」一次展开全部（${openAll} / ${n}）`);
+  ok(u.moveOpen(`${bi}:0`) && u.moveOpen(`${bi}:${n - 1}`), '展开状态被记入 openMoves');
+
+  u.toggleExpand();                                   // 再点一次收起
+  ok((cache['#reason'].innerHTML.match(/<details[^>]*\bopen\b/g) || []).length === 1, '再点一次收起，恢复只展开第一条');
+
+  u.goto(bi + 2); u.goto(bi + 1);                     // 来回切步后折叠状态不丢
+  ok((cache['#reason'].innerHTML.match(/<details[^>]*\bopen\b/g) || []).length === 1, '切步重绘后折叠状态稳定');
+
+  u.stepMode = true; u.doSolve();                     // 讲解模式下每步一格，不再有可折叠的批量块
+  ok(u.steps.every(s => s.kind !== 'place' || s.moves.length === 1), '讲解模式下批量块退场（每步一格）');
 });
 
 console.log(`\n========== UI 测试 通过 ${pass} / 失败 ${fail} ==========`);
