@@ -259,7 +259,9 @@ button.pri:hover:not(:disabled){background:linear-gradient(180deg,#4a87f8,#3b7bf
   </div>
 </div>
 
-<script src="dist/solver.js"></script>
-<script src="dist/ui.js"></script>
+<!-- 版本号 ?v= 用于命中新产物：GitHub Pages 对静态资源有 max-age=600 缓存，
+     改了 dist 却不改这里的版本号时，老用户 10 分钟内仍会拿到旧脚本。发布 dist 时顺手 +1。 -->
+<script src="dist/solver.js?v=2"></script>
+<script src="dist/ui.js?v=2"></script>
 </body>
 </html>
