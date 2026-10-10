@@ -276,6 +276,7 @@ section('10 批量填数：一步多格、同技巧、互不依赖', () => {
   // 分组回归：以前同一批里 naked 与 hidden 混着塞，单步最多 28 格，逐格讲解被压没
   ok(multi.every((s: any) => new Set(s.moves.map((m: any) => m.tech)).size === 1),
     '每个批量步只含一种技巧（不再混技巧）');
+  ok(maxN <= Sudoku.MAX_BATCH, `批量步设上限：单步最多 ${Sudoku.MAX_BATCH} 格（实测最多 ${maxN} 格），复杂推理单独成步、不挤进批量`);
   const totalPlaced = r.steps.reduce((n: number, s: any) => n + (s.kind === 'place' ? s.moves.length : 0), 0);
   ok(totalPlaced === 81 - WIKI_G.filter(Boolean).length, `总填格数 ${totalPlaced} == 空格数 ${81 - WIKI_G.filter(Boolean).length}`);
   let bad = 0;
@@ -327,6 +328,16 @@ section('11 Worker 协议：dist/worker.js 与 ui.ts 的消息契约', () => {
   const b = fire({ type: 'generate', minClues: 34, id: 8 });
   ok(b && b.id === 8 && Array.isArray(b.data) && b.data.length === 81, 'generate：回带 id，产出 81 格谜面');
   ok(b.data.filter(Boolean).length >= 24 && solve(b.data).status === 'ok', 'generate：谜面唯一可解');
+  // difficulty 走新式按难度出题：只验证路由（真跑 generateByDifficulty 要几十次挖空，单测太慢），
+  // 出题质量由 [7] 段覆盖。这里注入桩，把生成 stub 成固定谜面，只确认 Worker 调对了函数、传对了参数
+  const seenDiff: string[] = [];
+  const stubSelf2: any = { importScripts(): void {}, postMessage(m: any): void { posted.push(m); }, onmessage: null };
+  const wrapped: any = Object.assign({}, Sudoku, { generateByDifficulty: (d: string): number[] => { seenDiff.push(d); return WIKI_G.slice(); } });
+  initWorker(stubSelf2, wrapped);
+  posted.length = 0; stubSelf2.onmessage({ data: { type: 'generate', difficulty: 'easy', id: 12 } });
+  const b2 = posted[0];
+  ok(seenDiff.join(',') === 'easy' && b2 && b2.id === 12 && Array.isArray(b2.data) && b2.data.length === 81,
+    'generate：difficulty 路由到 generateByDifficulty（不走旧 minClues）');
   ok(fire({ type: 'unknown', id: 9 }) === undefined, '未知消息类型被忽略（不回复、不崩溃）');
 });
 
@@ -336,6 +347,8 @@ section('12 讲解模式（mode=teach）：一步一格，且与 fast 模式同�
   const teach = solve(given, { mode: 'teach' });
   const cells = (x: any): number => x.steps.reduce((n: number, s: any) => n + (s.kind === 'place' ? s.moves.length : 0), 0);
   ok(teach.status === 'ok' && teach.steps.length > 0, `teach 求解成功（${teach.steps.length} 步）`);
+  ok(teach.batches === fast.steps.length && fast.batches === fast.steps.length,
+    `batches＝原始推理步数（fast ${fast.steps.length} 步，teach 透传 ${teach.batches}）`);
   ok(teach.steps.every((s: any) => s.kind !== 'place' || s.moves.length === 1), '每步最多填一格');
   ok(teach.steps.length >= fast.steps.length, `teach 步数不少于 fast（${teach.steps.length} >= ${fast.steps.length}）`);
   ok(cells(teach) === cells(fast), `填格总数一致（${cells(teach)} / ${cells(fast)}）`);
@@ -360,6 +373,99 @@ section('12 讲解模式（mode=teach）：一步一格，且与 fast 模式同�
   const bad2 = given.slice(); bad2[0] = bad2[1] = given.find(Boolean) as number;
   const inv = solve(bad2, { mode: 'teach' });
   ok(inv.status !== 'ok' || inv.steps.length === 0, `异常题在 teach 模式下不产生步骤（status=${inv.status}）`);
+});
+
+section('13 一步一格：每步挑当前最显眼的一格（技巧基础 + 单元完成度高）', () => {
+  const given = WIKI_G;                       // 用固定谜面，保证可复现
+  const fast = solve(given);
+  const teach = solve(given, { mode: 'teach' });
+  ok(fast.status === 'ok' && teach.status === 'ok', 'fast / teach 求解成功');
+  // 取每个步骤在表中的下标（用于回放该步开始时的盘面）
+  const kOf = (steps: any[], st: any): number => steps.indexOf(st);
+
+  // 显眼度 = 该格所属行/列/宫中「已填格数」的峰值（该圈填得越满，这格越直观）。
+  // 断言排序不变量：同一步（同一批）内按显眼度降序排列，同分保持原扫描顺序。
+  // 注意比较范围是「同一步的批次内」——每步结束后盘面就变了，
+  // 拿后一步才出现的格来比较是错的（teach 模式下每步只填一格）。
+  const peak = (st: State, i: number): number => {
+    const [r, c] = Sudoku.RC(i);
+    let best = 0;
+    for (const u of [r, 9 + c, 18 + (Math.floor(r / 3) * 3 + Math.floor(c / 3))]) {
+      const n = Sudoku.UNITS[u].filter(j => st.val[j]).length;
+      if (n > best) best = n;
+    }
+    return best;
+  };
+  let notSorted = 0, checked = 0, multiSeen = 0;
+  for (const st of fast.steps) {
+    if (st.kind !== 'place' || st.moves.length < 2) continue;
+    multiSeen++;
+    const s = Sudoku.stateAt(given, fast.steps, kOf(fast.steps, st));
+    const scores = st.moves.map((mv: Move) => peak(s, mv.i));
+    checked++;
+    for (let x = 1; x < scores.length; x++) if (scores[x] > scores[x - 1]) notSorted++;   // 必须非递增
+  }
+  ok(multiSeen > 0 && checked > 0 && notSorted === 0,
+     `批量步内按显眼度降序排列（${checked} 个批量步，逆序 ${notSorted} 处）`);
+  ok(multiSeen > 0 && checked > 0, `存在多格批量步可供校验（${multiSeen} 个）`);
+
+  // 效果验证：把排序关掉时应看到不同顺序——用一次朴素扫描做对照，
+  // 确认排序确实改变了输出（否则本测试可能只是碰巧全过）
+  const naiveFirst = (() => {
+    const s0 = Sudoku.stateAt(given, [], 0);
+    let firstNaked = -1;
+    for (let i = 0; i < 81; i++) { if (s0.val[i]) continue; const m = s0.cand[i]; if (m && !(m & (m - 1))) { firstNaked = i; break; } }
+    return firstNaked;
+  })();
+  const actualFirst = fast.steps[0].kind === 'place' ? fast.steps[0].moves[0].i : -1;
+  ok(naiveFirst >= 0 && actualFirst >= 0, '对照数据可用（初始盘面存在唯一候选数）');
+  const s0 = Sudoku.stateAt(given, [], 0);
+  ok(peak(s0, actualFirst) >= peak(s0, naiveFirst),
+     `排序把更显眼的格提到了最前（选中 ${Sudoku.nm(actualFirst)} peak=${peak(s0, actualFirst)} ≥ 朴素首个 ${Sudoku.nm(naiveFirst)} peak=${peak(s0, naiveFirst)}）`);
+
+  // teach 模式下每步一格，界面读到的顺序应与 fast 批内顺序一致
+  const teachCells = teach.steps.filter((s: Step) => s.kind === 'place').slice(0, 4)
+    .map((s: Step) => (s as PlaceStep).moves[0].i);
+  const fastCells = (fast.steps[0] as PlaceStep).moves.slice(0, 4).map(m => m.i);
+  ok(JSON.stringify(teachCells) === JSON.stringify(fastCells),
+     `teach 逐步顺序与 fast 批内顺序一致（${teachCells.map(Sudoku.nm).join(' ')}）`);
+
+  // 效果验证（经典题首盘面固定，可复现）：第 1 步应是中心格 R5C5，
+  // 而不是按格号扫描会先遇到的边角 R1C1
+  const first = fast.steps[0];
+  ok(first.kind === 'place', '第 1 步是填数步');
+  const fi = first.kind === 'place' ? first.moves[0].i : -1;
+  ok(Sudoku.nm(fi) === 'R5C5',
+     `第 1 步选中中心格 ${Sudoku.nm(fi)}（朴素扫描会先遇到边角 R1C1）`);
+});
+
+section('14 难度分级：按实际用到的最高技巧定级，不用线索数', () => {
+  // difficultyOf 是纯函数：直接对已知技巧的步骤表断言
+  const mk = (tech: string): any => tech === 'guess'
+    ? { kind: 'place', moves: [{ i: 0, v: 1, tech: 'guess', reason: 'x', meta: null }], tech: 'guess' }
+    : { kind: 'elim', tech, mask: 1, cells: [0], reason: 'x', meta: { units: [], focus: [], marks: {} } };
+  const place: any = { kind: 'place', moves: [{ i: 0, v: 1, tech: 'naked', reason: 'x', meta: null }], tech: 'naked' };
+  ok(Sudoku.difficultyOf([place]) === 'easy', '只用唯一候选数 → 简单');
+  ok(Sudoku.difficultyOf([place, mk('locked')]) === 'medium', '用到区块摒除 → 中等');
+  ok(Sudoku.difficultyOf([place, mk('hiddenSub')]) === 'hard', '用到隐性数组 → 困难');
+  ok(Sudoku.difficultyOf([place, mk('xwing')]) === 'hard', '用到 X-Wing → 困难');
+  ok(Sudoku.difficultyOf([place, mk('locked'), mk('xwing')]) === 'hard', '高级技巧优先于中级 → 困难');
+  ok(Sudoku.difficultyOf([place, mk('guess')]) === 'expert', '含试填 → 专家（最高优先级）');
+  ok(Sudoku.difficultyOf([place, mk('locked'), mk('locked'), mk('locked'), mk('locked')]) === 'hard',
+     '排除步够多（≥4）即使无高级技巧也算困难');
+  ok(Sudoku.difficultyOf([place, mk('locked'), mk('locked'), mk('locked')]) === 'medium',
+     '排除步不足 4 次仍算中等');
+
+  // 出题：每一档都要真的命中，且保证唯一解
+  for (const d of ['easy', 'medium', 'hard', 'expert'] as const) {
+    const t0 = Date.now();
+    const p = Sudoku.generateByDifficulty(d);
+    const ms = Date.now() - t0;
+    const got = Sudoku.difficultyOf(solve(p).steps);
+    ok(got === d, `「${Sudoku.DIFF_LABEL[d]}」按钮出题，实际难度=${Sudoku.DIFF_LABEL[got]}（${p.filter(Boolean).length} 线索，${ms}ms）`);
+    ok(Sudoku.findAll(p, 2).solutions.length === 1, `「${Sudoku.DIFF_LABEL[d]}」题唯一解`);
+    ok(ms < 8000, `「${Sudoku.DIFF_LABEL[d]}」出题不卡界面（${ms}ms < 8000ms）`);
+  }
 });
 
 console.log(`\n========== 通过 ${pass} / 失败 ${fail} ==========`);

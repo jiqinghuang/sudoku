@@ -8,7 +8,9 @@
    消息契约（与 ui.ts 的 runTask、test.ts 的 [11] 段对应）：
      收 { type:'solve', given, mode, id }   → 回 { id, data: SolveResult }
      （mode:'fast' | 'teach' 原样转交 Sudoku.solve；省略等价于 fast，兼容旧客户端）
-     收 { type:'generate', minClues, id }  → 回 { id, data: number[]（81 格谜面） }
+     收 { type:'generate', difficulty, id }  → 回 { id, data: number[]（81 格谜面） }
+      （difficulty:'easy'|'medium'|'hard'|'expert'，按实际所需最高技巧定级出题；
+        旧客户端若仍传 minClues，则退回复用旧的按线索数挖空）
      未知 type 一律忽略（不回复、不崩溃）。 */
 /* Worker 全局与页面共享 self 符号，但 DOM 类型库只认 Window——
    这里按需收窄成 Worker 侧实际用到的最小接口面。 */
@@ -20,5 +22,6 @@ ctx.onmessage = (e) => {
     if (msg.type === 'solve')
         ctx.postMessage({ id: msg.id, data: Sudoku.solve(msg.given, { mode: msg.mode }) });
     else if (msg.type === 'generate')
-        ctx.postMessage({ id: msg.id, data: Sudoku.generatePuzzle(msg.minClues) });
+        ctx.postMessage({ id: msg.id,
+            data: msg.difficulty ? Sudoku.generateByDifficulty(msg.difficulty) : Sudoku.generatePuzzle(msg.minClues) });
 };

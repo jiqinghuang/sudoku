@@ -86,6 +86,7 @@ button{background:#fff;color:var(--txt);border:1px solid var(--line2);border-rad
 button:hover:not(:disabled){background:#f5f8ff;border-color:#b9c9e4;box-shadow:0 2px 8px rgba(47,111,237,.14)}
 button:active:not(:disabled){transform:translateY(1px)}
 button:disabled{opacity:.45;cursor:default;box-shadow:none}
+[hidden]{display:none!important}
 button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 button.pri{background:linear-gradient(180deg,#3b7bf6,#2f6fed);border-color:#2f6fed;color:#fff;
   padding:8px 16px;font-weight:600;box-shadow:0 2px 10px rgba(47,111,237,.35)}
@@ -208,6 +209,7 @@ button.pri:hover:not(:disabled){background:linear-gradient(180deg,#4a87f8,#3b7bf
 
     <div class="playbar">
       <button class="pri" id="bSolve" title="校验题目并生成逐步推理">求解</button>
+      <button id="bCancel" hidden title="取消当前求解/出题">✕ 取消</button>
       <span class="navgrp">
         <button id="bFirst" title="回到开头" aria-label="回到开头">⏮</button><button id="bPrev" title="上一步" aria-label="上一步">◀</button>
         <button id="bNext" title="下一步" aria-label="下一步">▶</button><button id="bLast" title="跳到最后" aria-label="跳到最后">⏭</button>
@@ -224,8 +226,8 @@ button.pri:hover:not(:disabled){background:linear-gradient(180deg,#4a87f8,#3b7bf
     <div class="genbar">
       <span class="glabel">随机出题</span>
       <span class="diff">
-        <button data-gen="40">简单</button><button data-gen="34">中等</button>
-        <button data-gen="28">困难</button><button data-gen="24">专家</button>
+        <button data-gen="easy">简单</button><button data-gen="medium">中等</button>
+        <button data-gen="hard">困难</button><button data-gen="expert">专家</button>
       </span>
       <button id="bClr">清空棋盘</button>
     </div>
@@ -237,7 +239,7 @@ button.pri:hover:not(:disabled){background:linear-gradient(180deg,#4a87f8,#3b7bf
       <span class="chk">
         <label><input type="checkbox" id="cCands">候选数</label>
         <label><input type="checkbox" id="cElims" checked>排除步骤</label>
-        <label title="勾选：每步只填一格，逐步讲解；取消：同一次推理的多格合并成一步"><input type="checkbox" id="cMode" checked>一步一格</label>
+        <label title="勾选：每步只填一格，逐步讲解；取消：同一次推理的多格合并成一步"><input type="checkbox" id="cMode">一步一格</label>
       </span>
     </div>
     <div class="card"><h2>题目诊断</h2><div class="body" id="diag"></div></div>

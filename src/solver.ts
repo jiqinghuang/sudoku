@@ -28,13 +28,18 @@ type InitOut =
   | { error: 'known'; msg: string; state?: undefined }
   | { error?: undefined; msg?: undefined; state: State };
 
+/** 难度分级：按解这道题实际用到的最高技巧定级（不是线索数） */
+type Difficulty = 'easy' | 'medium' | 'hard' | 'expert';
+
 type SearchOut = { ok: true; steps: Step[]; solution: number[] } | { ok: false; conflict: number };
 
 type SolveResult =
   | { status: 'invalid'; msg: string }
   | { status: 'nosol'; clues?: number; backtracks?: number; msg: string }
   | { status: 'multi'; clues: number; msg: string; diff: string[]; steps: null }
-  | { status: 'ok'; clues: number; steps: Step[]; final: number[]; stats: Record<string, number>; guesses: number; backtracks: number };
+  | { status: 'ok'; clues: number; steps: Step[]; final: number[]; stats: Record<string, number>; guesses: number; backtracks: number;
+      /** 原始推理步数（fast 步骤表长度）：teach 拆分后也原样透传，界面据此显示「第 N 次推理」，不再靠回放反推 */
+      batches: number };
 
 /** 求解选项：
     - mode:'fast'（默认）一步合并同类确定格，步数最少；
@@ -46,19 +51,22 @@ interface SudokuAPI {
   solve(given: number[], opts?: SolveOpts): SolveResult;
   findAll(given: number[], limit?: number): { solutions: number[][]; error?: boolean; msg?: string };
   generatePuzzle(minClues: number): number[];
+  /** 按难度出题（easy/medium/hard/expert）：挖空后复核真实难度，不达标重抽。
+      极端情况下预算耗尽会返回最接近的一题，实际难度请读 solve(p).difficulty。 */
+  generateByDifficulty(d: Difficulty): number[];
+  /** 由走通路径的步骤表判定难度（只看技巧，不含试错分支） */
+  difficultyOf(steps: Step[]): Difficulty;
+  /** 难度中文名，供界面按钮与诊断面板使用 */
+  DIFF_LABEL: Record<Difficulty, string>;
   stateAt(given: number[], steps: Step[] | null, k: number): State;
   /** 批量步的界面标签：一步一格（teach）模式与单格（fast）模式共用，避免文案漂移 */
   TECH_LABEL(tech: string): string;
-  ALL: number;
+  /** 单步最多填几格（批量上限）：求解器与单测共用一处，避免两边各写一个 4 */
+  MAX_BATCH: number;
   RC(i: number): [number, number];
   nm(i: number): string;
-  ln(i: number): string;
   bits(m: number): number[];
-  pop(m: number): number;
-  PEERS: number[][];
   UNITS: number[][];
-  RNAME: string[];
-  TECH: Record<string, string>;
 }
 
 (function (root: any, factory: () => SudokuAPI) {
@@ -380,6 +388,28 @@ interface SudokuAPI {
      因此一次只返回一组，交给下一轮重新判定。
      回归：以前把 naked 与 hidden 混成一个 mixed 步，单步最多 28 格，
      逐步讲解的颗粒度被压没了。 */
+  /* 显眼度：取这一格所属的三个单元（行/列/宫）里「已填格数」的峰值。
+     meta.units 正好就是这三个单元，naked 填 [行,列,宫]、hidden 填 [单元]。
+     峰值越高 = 那一圈已经快填满 = 这格被排除掉最直观，最先讲最自然。
+     排序是稳定排序，同分时保留原有的盘面扫描顺序（从上到下、从左到右）。 */
+  const visibleScore = (s: State, mv: Move): number => {
+    const us = mv.meta ? mv.meta.units : [];
+    let best = 0;
+    for (const u of us) { const n = UNITS[u].reduce((a, i) => a + (s.val[i] ? 1 : 0), 0); if (n > best) best = n; }
+    return best;
+  };
+  /** 按显眼度降序排（就地排序 + 返回原数组，调用点写法保持不变） */
+  const byVisible = (s: State, moves: Move[]): Move[] => moves.sort((a, b) => visibleScore(s, b) - visibleScore(s, a));
+
+  /* ---- 分步原则：明显的独立格可批量，复杂的单独一步，批量设上限 ----
+     - 批量只收「同一种技巧、基于本步开始时盘面互不依赖」的确定格（naked 一组 / 单个单元的 hidden 一组），
+       一步解释清楚，不把多步推理的结论混进来；
+     - 排除类（locked/nakedSub/hiddenSub/xwing）和试填（guess）是多格联动的复杂推理，各自单独一步
+       （findStep 一次只交一个排除步，guess 永远单格，见下）；
+     - 批量设上限：同组候选再多，一步也只讲最显眼的前 MAX_BATCH 格，其余下一轮再讲，
+       避免一屏十几格讲不清。 */
+  const MAX_BATCH = 4;
+
   function collectSingles(s: State): Move[] {
     const naked: Move[] = [], used = new Uint8Array(81);
     for (let i = 0; i < 81; i++) {                        // 组 1：唯一候选数
@@ -387,7 +417,7 @@ interface SudokuAPI {
       const m = s.cand[i];
       if (m && !(m & (m - 1))) { naked.push(makeNaked(s, i, valOfBit(m))); used[i] = 1; }
     }
-    if (naked.length) return naked;
+    if (naked.length) return byVisible(s, naked).slice(0, MAX_BATCH);
     for (let u = 0; u < 27; u++) {                        // 组 2..n：行/列/宫唯一（按单元分组）
       const uM = usedIn(s, u), group: Move[] = [];
       for (let d = 1; d <= 9; d++) {
@@ -396,7 +426,7 @@ interface SudokuAPI {
         for (const i of UNITS[u]) if (!s.val[i] && (s.cand[i] & bitOf(d))) { spot = i; if (++cnt > 1) break; }
         if (cnt === 1 && !used[spot]) { group.push(makeHidden(s, u, spot, d)); used[spot] = 1; }
       }
-      if (group.length) return group;                     // 只交出一个单元，其余下一轮再说
+      if (group.length) return byVisible(s, group).slice(0, MAX_BATCH);        // 只交出一个单元的前几格，其余下一轮再说
     }
     return [];
   }
@@ -541,7 +571,7 @@ interface SudokuAPI {
     if (r0.error) return { status: 'invalid', msg: r0.msg };
     const clues = given.filter(Boolean).length;
     if (full(r0.state)) {
-      return { status: 'ok', clues, steps: [], final: Array.from(r0.state.val), stats: {}, guesses: 0, backtracks: 0 };
+      return { status: 'ok', clues, steps: [], final: Array.from(r0.state.val), stats: {}, guesses: 0, backtracks: 0, batches: 0 };
     }
     const stats: Record<string, number> = {};
     const r = search(clone(r0.state), [], stats);
@@ -553,8 +583,9 @@ interface SudokuAPI {
     }
     const guesses = stats.guess || 0;
     const backtracks = stats.backtracks || 0;
+    // batches 取拆分前的 fast 表长度：teach 只是展示层拆分，推理次数不变，两边透传同一个数
     const present = (steps: Step[], final: number[]): SolveResult =>
-      ({ status: 'ok', clues, steps: opts?.mode === 'teach' ? expandSteps(steps) : steps, final, stats, guesses, backtracks });
+      ({ status: 'ok', clues, steps: opts?.mode === 'teach' ? expandSteps(steps) : steps, final, stats, guesses, backtracks, batches: steps.length });
     if (guesses === 0) {
       // 每一步都是保持解集不变的确定性推理，最终得到唯一终盘 ⇒ 题目唯一解
       return present(r.steps, r.solution);
@@ -602,5 +633,56 @@ interface SudokuAPI {
     return p;
   }
 
-  return { solve, findAll, generatePuzzle, stateAt, TECH_LABEL: (t: string): string => TECH[t], ALL, RC, nm, ln, bits, pop, PEERS, UNITS, RNAME, TECH };
+  /* ============================================================
+     难度分级：按「解这道题用到的最高技巧」定级，而不是按线索数
+     —— 线索少不代表难（挖对了用唯一候选数也能推完）。
+     只看走通的那条路的步骤表，不含试错分支，用 stats 会把回溯污染算进去。
+
+     hard 的判定要现实一点：隐性数组/X-Wing 在随机挖空下命中率仅约 2%，
+     硬要命中就得试 200+ 次，出题要等几十秒——按钮看起来像卡死。
+     所以 hard 用两级判定：能用到高级技巧就算；否则退而用「排除步够多」
+     （反复做区块/显性数组推理）来区分，命中率稳定、出题在百毫秒级。
+     ============================================================ */
+  const DIFF_LABEL: Record<Difficulty, string> = { easy: '简单', medium: '中等', hard: '困难', expert: '专家' };
+  const HARD_ELIM_STEPS = 4;      // 无高级技巧时，排除步达到这个数算困难
+
+  function difficultyOf(steps: Step[]): Difficulty {
+    let hard = false, med = false, elims = 0;
+    for (const st of steps) {
+      if (st.kind === 'place') { if (st.moves.some(mv => mv.tech === 'guess')) return 'expert'; continue; }
+      elims++;
+      if (st.tech === 'hiddenSub' || st.tech === 'xwing') hard = true;
+      else if (st.tech === 'locked' || st.tech === 'nakedSub') med = true;
+    }
+    if (hard || elims >= HARD_ELIM_STEPS) return 'hard';
+    return med ? 'medium' : 'easy';
+  }
+
+  /* 各难度的挖空目标与重试预算：
+     线索数只是「搜索空间」的粗调，真正是否达标由 difficultyOf 复核。
+     预算耗尽就按 order 退而求其次返回最好的一题，绝不让界面卡在「出题中」。 */
+  const DIFF_SPEC: Record<Difficulty, { minClues: number; tries: number; order: Difficulty[] }> = {
+    easy:   { minClues: 36, tries: 40,  order: ['easy', 'medium'] },
+    medium: { minClues: 28, tries: 60,  order: ['medium', 'hard'] },
+    hard:   { minClues: 24, tries: 60,  order: ['hard', 'medium', 'expert'] },
+    expert: { minClues: 22, tries: 60,  order: ['expert', 'hard'] },
+  };
+
+  /** 按难度出题：挖空后用求解器复核真实难度，不达标就重抽。 */
+  function generateByDifficulty(d: Difficulty): number[] {
+    const spec = DIFF_SPEC[d];
+    let best: number[] = [], bestRank = 99;
+    for (let t = 0; t < spec.tries; t++) {
+      const p = generatePuzzle(spec.minClues);
+      const r = search(init(p).state as State, [], {});
+      if (!r.ok) continue;                                 // 理论上挖空保证唯一解，兜底跳过
+      const got = difficultyOf(r.steps);
+      const rank = spec.order.indexOf(got);
+      if (rank >= 0 && rank < bestRank) { best = p; bestRank = rank; }
+      if (rank === 0) return p;                            // 命中目标难度
+    }
+    return best.length ? best : generatePuzzle(spec.minClues);
+  }
+
+  return { solve, findAll, generatePuzzle, generateByDifficulty, difficultyOf, DIFF_LABEL, stateAt, TECH_LABEL: (t: string): string => TECH[t], MAX_BATCH, RC, nm, bits, UNITS };
 });

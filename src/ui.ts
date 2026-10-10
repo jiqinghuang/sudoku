@@ -6,9 +6,9 @@ const board = $('#board'), pad = $('#pad');
 let given: number[] = new Array(81).fill(0);
 let steps: Step[] = [], cur = 0, sel = 40,
     playing: number | null = null, showCands = false, showElims = true;
-/* 讲解模式：一步一格（true，默认）还是同类确定格合并成一步（false）。
+/* 讲解粒度：一步一格（true）还是同类确定格合并成一步（false，默认）。
    两条模式都来自同一次推理，只是步骤表的展示粒度不同——见 solver.solve 的 opts.mode。 */
-let stepMode = true;
+let stepMode = false;
 /* 讲解模式下用来标注「这 N 步其实是同一次推理」的原始推理步数，由 applySteps 还原 */
 let teachBatchSteps = 0;
 /* 批量步的逐格理由是否展开：'步骤序号:格序' 集合，折叠状态跨重绘保留 */
@@ -36,7 +36,7 @@ const bitsOf = Sudoku.bits;
    Worker 内异常回退重试再抛错，都由 settle() 兜住，保证调用方的 setBusy(false)
    必定执行——否则按钮会永久停在禁用态、状态标签永远显示「求解中…」。 */
 type SolveMsg = { type: 'solve'; given: number[]; mode: 'fast' | 'teach' };
-type TaskMsg = SolveMsg | { type: 'generate'; minClues: number };
+type TaskMsg = SolveMsg | { type: 'generate'; difficulty: Difficulty };
 interface PendingTask { msg: TaskMsg; fn: (data: any) => void; fail: (err: unknown) => void }
 
 let worker: Worker | null = null, workerBroken = false, taskId = 0, busy = false, epoch = 0;
@@ -45,7 +45,7 @@ try { worker = new Worker('dist/worker.js'); }
 catch (e) { workerBroken = true; console.warn('[worker] 不可用，改为主线程同步求解：' + (e as Error).message); }
 
 const runSync = (msg: TaskMsg): any =>
-  msg.type === 'solve' ? Sudoku.solve(msg.given, { mode: msg.mode }) : Sudoku.generatePuzzle(msg.minClues);
+  msg.type === 'solve' ? Sudoku.solve(msg.given, { mode: msg.mode }) : Sudoku.generateByDifficulty(msg.difficulty);
 
 /* 同步执行并兜住异常：这是「派发失败后重试」与「无 Worker 直接同步」两条路径的共同出口。 */
 function settle(p: PendingTask): void {
@@ -64,9 +64,10 @@ function runTask(msg: TaskMsg, fn: (data: any) => void, fail: (err: unknown) => 
   }
 }
 
-function setBusy(on: boolean): void {   // 任务在途：禁用会触发新任务的按钮，防重复提交
+function setBusy(on: boolean): void {   // 任务在途：禁用会触发新任务的按钮，防重复提交；同时显隐取消按钮
   busy = on;
   $('#bSolve').disabled = on;
+  $('#bCancel').hidden = !on;
   (document.querySelectorAll('[data-gen]') as NodeListOf<HTMLElement>).forEach((b: any) => { b.disabled = on; });
 }
 
@@ -89,12 +90,17 @@ interface CellRefs { el: HTMLDivElement; v: HTMLSpanElement; cands: HTMLDivEleme
 const cellEls: CellRefs[] = [];
 function buildBoard(): void {
   board.innerHTML = '';
+  board.setAttribute('role', 'grid');
+  board.setAttribute('aria-label', '数独棋盘');
   for (let i = 0; i < 81; i++) {
     const el = document.createElement('div');
     const v = document.createElement('span'); v.className = 'v';
     const cands = document.createElement('div'); cands.className = 'cands';
     const badge = document.createElement('span'); badge.className = 'badge';
     el.appendChild(v); el.appendChild(cands); el.appendChild(badge);
+    el.setAttribute('role', 'gridcell');
+    el.tabIndex = i === sel ? 0 : -1;
+    el.setAttribute('aria-selected', i === sel ? 'true' : 'false');
     el.onclick = () => { sel = i; render(); };
     el.ondblclick = () => { const n = steps.findIndex(s2 => s2.kind === 'place' && s2.moves.some(m => m.i === i)); if (n >= 0) { cur = n + 1; render(); } };
     board.appendChild(el);
@@ -108,19 +114,9 @@ function buildBoard(): void {
    cur 夹在新表长度内：切模式后不会停在不存在的步号上。 ---- */
 function applySteps(data: any): void {
   steps = data.steps || [];
-  // 讲解模式下，一个 fast 步会被拆成多步贴在一起，它们属于同一次推理：据此还原「推理步数」
-  const before = (k: number): number[] => Array.from(Sudoku.stateAt(given, steps, k).val);
-  let bs = 0, prev = -1;
-  for (let k = 1; k <= steps.length; k++) {
-    const st = steps[k - 1];
-    if (st.kind !== 'place') continue;
-    if (steps[k] === undefined) break;                  // 末尾整批尚未落盘：不计入已完成批次
-    const v = before(k); let applied = 0;
-    for (const mv of st.moves) if (v[mv.i]) applied++;
-    if (applied > 0 && applied !== prev) bs++;          // 已落盘格数跳变 = 进入下一批
-    prev = applied;
-  }
-  teachBatchSteps = bs;
+  // 推理步数由求解器直接给出（res.batches＝fast 表长度）：teach 拆分后贴在一起的单格步同属一次推理。
+  // 旧版在此逐 k 重放 stateAt 反推批次是 O(n²)，步数多了会顿；老数据无 batches 时退回有步数即 1。
+  teachBatchSteps = typeof data.batches === 'number' ? data.batches : (steps.length ? 1 : 0);
   if (cur > steps.length) cur = steps.length;
 }
 
@@ -160,6 +156,8 @@ function render(): void {
 
   for (let i = 0; i < 81; i++) {
     const [r, c] = Sudoku.RC(i), { el, v, cands, badge } = cellEls[i];
+    el.tabIndex = i === sel ? 0 : -1;                       // roving tabindex：81 格只有一个 Tab 停靠点
+    el.setAttribute('aria-selected', i === sel ? 'true' : 'false');
     let cls = 'cell';
     if (c === 2 || c === 5) cls += ' bR';
     if (r === 2 || r === 5) cls += ' bB';
@@ -317,6 +315,7 @@ function doSolve(): void {
       + row('info', '需先补充已知数字使其唯一，才能给出确定步骤。')); render(); return; }
     applySteps(res);                               // 关键：把求解结果接到回放用的步骤表
     h += row('ok', '✅ 唯一解（已验证解的数量 = 1）');
+    h += row('info', `难度评级：<b>${Sudoku.DIFF_LABEL[Sudoku.difficultyOf(res.steps)]}</b>（按解这题实际用到的最高技巧判定，不是线索数）`);
     if (res.guesses) h += row('warn', `⚠ 含 <b>${res.guesses}</b> 步试填（逻辑推理已无法推进），这些步已标黄，不具备唯一性。`);
     else h += row('ok', '全程仅用唯一性逻辑推理，无需试填。');
     if (res.backtracks) h += row('info', `求解时发生 ${res.backtracks} 次试错回溯（未在步骤表中显示）。`);
@@ -331,6 +330,7 @@ function doSolve(): void {
     render();
   }, (err) => {                                // 求解抛错：恢复可交互状态并如实报错
     setBusy(false);
+    if (ep !== epoch) return;                     // 取消后的迟到失败不覆盖界面（与成功回调同规则）
     setState('求解失败', 'err');
     diag(row('bad', '❌ 求解出错：' + esc(err instanceof Error ? err.message : err)));
   });
@@ -385,6 +385,11 @@ $('#bExpand').onclick = () => {
   else for (let k = 0; k < n; k++) openMoves.add(`${cur - 1}:${k}`);
   renderReason();
 };
+$('#bCancel').onclick = () => {   // 取消在途任务：版本号+1 让迟到的 Worker 结果自动丢弃（各回调均有 epoch 守卫）
+  if (!busy) return;
+  stop(); epoch++; setBusy(false); setState('已取消');
+  diag(row('info', '已取消当前任务。可重新求解，或点随机出题换一题。')); render();
+};
 $('#bClr').onclick = () => { stop(); epoch++; given = new Array(81).fill(0); steps = []; cur = 0; sel = 40; teachBatchSteps = 0;
   setState('未解题');
   diag(row('info', '空白盘面，点数字键填入已知数字。')); render(); };
@@ -393,25 +398,27 @@ $('#bClr').onclick = () => { stop(); epoch++; given = new Array(81).fill(0); ste
   stop(); steps = []; cur = 0; epoch++; teachBatchSteps = 0;   // 换题使在途求解结果失效
   const ep = epoch;
   setBusy(true); setState('出题中…');
-  runTask({ type: 'generate', minClues: +(b.dataset.gen as string) }, (p: number[]) => {
+  runTask({ type: 'generate', difficulty: b.dataset.gen as Difficulty }, (p: number[]) => {
     setBusy(false);
     if (ep !== epoch) return;                     // 等待期间用户清空/改过谜面：丢弃本次出题，不覆盖用户操作
     given = p; doSolve();
   }, (err) => {
     setBusy(false);
+    if (ep !== epoch) return;                     // 取消后的迟到失败不覆盖界面
     setState('出题失败', 'err');
     diag(row('bad', '❌ 出题出错：' + esc(err instanceof Error ? err.message : err)));
   });
 });
 
+const focusSel = (): void => { const c = cellEls[sel]; if (c) c.el.focus(); };   // 有格才聚焦：首屏 render 前 cellEls 为空
 addEventListener('keydown', (e: KeyboardEvent) => {
   const tgt = e.target as unknown as { tagName: string; type: string };
   if (tgt.tagName === 'INPUT') return;           // 滑杆等控件交给它自己处理
   const r = (sel / 9 | 0), c = sel % 9;
-  if (e.key === 'ArrowUp') { sel = ((r + 8) % 9) * 9 + c; e.preventDefault(); }
-  else if (e.key === 'ArrowDown') { sel = ((r + 1) % 9) * 9 + c; e.preventDefault(); }
-  else if (e.key === 'ArrowLeft') { sel = r * 9 + (c + 8) % 9; e.preventDefault(); }
-  else if (e.key === 'ArrowRight') { sel = r * 9 + (c + 1) % 9; e.preventDefault(); }
+  if (e.key === 'ArrowUp') { sel = ((r + 8) % 9) * 9 + c; e.preventDefault(); focusSel(); }
+  else if (e.key === 'ArrowDown') { sel = ((r + 1) % 9) * 9 + c; e.preventDefault(); focusSel(); }
+  else if (e.key === 'ArrowLeft') { sel = r * 9 + (c + 8) % 9; e.preventDefault(); focusSel(); }
+  else if (e.key === 'ArrowRight') { sel = r * 9 + (c + 1) % 9; e.preventDefault(); focusSel(); }
   else if (e.key >= '1' && e.key <= '9') editGiven(sel, +e.key);
   else if (e.key === '0' || e.key === 'Delete') editGiven(sel, 0);
   else if (e.key === 'Enter') { stop(); goto(cur + 1); e.preventDefault(); }

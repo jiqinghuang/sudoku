@@ -29,6 +29,8 @@ function mkEl(tag) {
     const t = (tag || 'div').toUpperCase();
     const el = {
         tagName: t, textContent: '', value: '', type: '', className: '', checked: false, disabled: false,
+        hidden: false,
+        tabIndex: -1, attrs: {},
         dataset: {}, style: {}, children: [], onclick: null, ondblclick: null,
         _html: '',
         get innerHTML() {
@@ -39,6 +41,9 @@ function mkEl(tag) {
             this.children = [...String(v).matchAll(/<(li|button|div|span|i)\b/g)].map(m => mkEl(m[1]));
         },
         appendChild(c) { this.children.push(c); return c; },
+        setAttribute(k, v) { this.attrs[k] = String(v); },
+        getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; },
+        focus() { focused.push(this); },
         classList: { add() { } },
         scrollIntoView() { },
         querySelectorAll(sel) {
@@ -57,6 +62,7 @@ const document = {
     addEventListener() { },
 };
 let keyHandler = null;
+const focused = []; // focus() 调用记录：断言焦点跟随选中格
 /* 每次调用都跑出一份全新的界面实例（模块级状态相互独立），供 U8 反复注入不同的 Worker。 */
 const loadUi = () => new Function('document', 'addEventListener', 'alert', 'Sudoku', script + `
   ;return { doSolve, goto, stop, editGiven, bitsOf,
@@ -299,6 +305,25 @@ section('U8 Worker 分支：正常应答 / 各类失败降级均不卡死', () =
         ok(cache['#bSolve'].disabled === false, 'W5 求解抛错后按钮恢复可用（回归：卡死）');
         ok(/求解出错/.test(cache['#diag'].innerHTML), 'W5 诊断面板如实报错');
         ok(cache['#tState'].textContent === '求解失败', 'W5 状态标签切到失败态');
+        // W6 取消在途任务：迟到的 Worker 应答按版本丢弃，不覆盖用户界面
+        let late = null;
+        g.Worker = class {
+            constructor() {
+                this.onmessage = null;
+                this.onerror = null;
+            }
+            postMessage(m) { const deliver = () => this.onmessage({ data: { id: m.id, data: Sudoku.solve(m.given) } }); late = deliver; }
+        };
+        const w6 = loadUi();
+        w6.given = WIKI.slice();
+        w6.doSolve();
+        ok(cache['#bSolve'].disabled === true, 'W6 任务在途：求解按钮禁用');
+        ok(cache['#bCancel'].hidden === false, 'W6 任务在途：取消按钮可见');
+        cache['#bCancel'].onclick();
+        ok(cache['#bSolve'].disabled === false, 'W6 取消后按钮恢复可用');
+        ok(cache['#bCancel'].hidden === true, 'W6 取消后取消按钮隐藏');
+        late();
+        ok(solved(w6) === 0 && /已取消/.test(cache['#diag'].innerHTML), 'W6 迟到应答被丢弃（无步骤、不覆盖取消提示）');
     }
     finally {
         console.warn = savedWarn;
@@ -357,6 +382,24 @@ section('U10 逐格理由可折叠：默认只开一条，展开按钮与状态�
     u.stepMode = true;
     u.doSolve(); // 讲解模式下每步一格，不再有可折叠的批量块
     ok(u.steps.every(s => s.kind !== 'place' || s.moves.length === 1), '讲解模式下批量块退场（每步一格）');
+});
+section('U11 键盘可达性：棋盘语义、roving tabindex、方向键跟随焦点', () => {
+    const u = freshUi();
+    u.given = WIKI.slice();
+    u.doSolve();
+    const board = cache['#board'];
+    ok(board.getAttribute('role') === 'grid', '棋盘 role=grid');
+    ok(board.children.length === 81 && board.children.every(c => c.getAttribute('role') === 'gridcell'), '81 格均为 role=gridcell');
+    ok(board.children[u.sel].tabIndex === 0 && board.children.filter((_, i) => i !== u.sel).every(c => c.tabIndex === -1), 'roving tabindex：只有选中格可 Tab 到达');
+    ok(board.children[u.sel].getAttribute('aria-selected') === 'true', '选中格 aria-selected=true');
+    const before = u.sel;
+    focused.length = 0;
+    keyHandler({ key: 'ArrowRight', target: { tagName: 'DIV' }, preventDefault() { } });
+    const expect = ((before / 9) | 0) * 9 + (before + 1) % 9; // 行内右移（与 ui 内 wrap 逻辑一致）
+    ok(u.sel === expect, `方向键右移选中（${before}→${u.sel}）`);
+    ok(board.children[expect].tabIndex === 0 && board.children[before].tabIndex === -1, 'tabindex 跟随选中');
+    ok(board.children[expect].getAttribute('aria-selected') === 'true', 'aria-selected 跟随选中');
+    ok(focused[focused.length - 1] === board.children[expect], '焦点跟随选中格');
 });
 console.log(`\n========== UI 测试 通过 ${pass} / 失败 ${fail} ==========`);
 process.exit(fail ? 1 : 0);
